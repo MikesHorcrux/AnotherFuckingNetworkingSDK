@@ -2,7 +2,7 @@
 
 Yet another Swift networking library, but this one actually doesn't suck. It's lightweight, powerful, and built for modern Swift with async/await. No bullshit, just clean API calls. ✨
 
-Is it missing functionality? Maybe. But it fucking works, and you can just email your-email@example.com with your complaints or contribute. Or don't. Whatever. 🤷‍♂️
+Is it missing functionality? Maybe. But it fucking works, and you can just email < Your email here > with your complaints or contribute. Or don't. Whatever. 🤷‍♂️
 
 ## ✨ Features
 
