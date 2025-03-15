@@ -23,13 +23,13 @@ Add the following to your `Package.swift` file, or don't, I'm not your mom: 👩
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/yourusername/AnotherFuckingNetworkingSDK.git", from: "1.0.0")
+    .package(url: "https://github.com/MikesHorcrux/AnotherFuckingNetworkingSDK.git", from: "1.0.0")
 ]
 ```
 
 Or in Xcode:
 1. Go to File → Add Packages... 📁
-2. Enter the repository URL: `https://github.com/yourusername/AnotherFuckingNetworkingSDK.git`
+2. Enter the repository URL: `https://github.com/MikesHorcrux/AnotherFuckingNetworkingSDK.git`
 3. Click "Add Package" and wait for Xcode to inevitably freeze for no reason ⏳❄️
 
 ## 🚀 Quick Start
