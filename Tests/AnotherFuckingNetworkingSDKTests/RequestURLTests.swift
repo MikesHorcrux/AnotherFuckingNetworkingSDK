@@ -77,6 +77,59 @@ struct RequestURLTests {
             URLQueryItem(name: "tag", value: "ios")
         ])
     }
+
+    @Test("Global request customization sees the final request")
+    func globalRequestCustomization() async throws {
+        let captured = LockedBox<URLRequest?>(nil)
+        let session = StubSession { request in
+            captured.withLock { $0 = request }
+            return .respond(try .http(
+                for: request,
+                statusCode: 204
+            ))
+        }
+        let client = session.client(
+            globalHeaders: ["X-Client": "sdk"],
+            requestCustomizer: { request in
+                #expect(request.httpMethod == "GET")
+                #expect(request.value(forHTTPHeaderField: "X-Client") == "sdk")
+                request.setValue("trace-42", forHTTPHeaderField: "X-Trace-ID")
+            }
+        )
+
+        _ = try await client.send(URLTestRequest(path: "users"))
+
+        let request = try #require(captured.withLock { $0 })
+        #expect(request.url == session.baseURL.appendingPathComponent("users"))
+        #expect(request.value(forHTTPHeaderField: "X-Trace-ID") == "trace-42")
+    }
+
+    @Test("Global request customization failures are structured")
+    func globalRequestCustomizationFailure() async throws {
+        let session = StubSession { request in
+            .respond(try .http(for: request, statusCode: 204))
+        }
+        let client = session.client(
+            requestCustomizer: { _ in
+                throw CustomizerError.failed
+            }
+        )
+
+        do {
+            _ = try await client.send(URLTestRequest(path: "users"))
+            Issue.record("Expected request customization to fail")
+        } catch let error as NetworkError {
+            guard case .requestConfigurationFailed(let underlying) = error else {
+                Issue.record("Expected requestConfigurationFailed, got \(error)")
+                return
+            }
+            #expect(underlying is CustomizerError)
+        }
+    }
+}
+
+private enum CustomizerError: Error, Sendable {
+    case failed
 }
 
 private struct URLTestRequest: Request {
