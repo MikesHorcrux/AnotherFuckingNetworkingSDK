@@ -16,7 +16,7 @@ jobs:
   swift:
     name: Swift 6
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Toolchain
@@ -70,6 +70,30 @@ jobs:
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
+      - name: iOS simulator tests (when installed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          destinations="$(xcodebuild \
+            -scheme AnotherFuckingNetworkingSDK-Package \
+            -showdestinations 2>/dev/null || true)"
+          simulator_id="$(printf '%s\n' "$destinations" | awk -F'id:' \
+            '/platform:iOS Simulator, arch/ {
+              split($2, values, ","); print values[1]; exit
+            }' | tr -d '[:space:]')"
+          if [[ -z "$simulator_id" ]]; then
+            echo "Skipping iOS simulator tests: no simulator is installed."
+            exit 0
+          fi
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDK-Package \
+            -destination "id=${simulator_id}" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -skip-testing:AnotherFuckingNetworkingSDKTests/WebSocketLoopbackTests \
+            test
           xcodebuild -quiet \
             -scheme AnotherFuckingNetworkingSDKTesting \
             -destination 'generic/platform=macOS' \
