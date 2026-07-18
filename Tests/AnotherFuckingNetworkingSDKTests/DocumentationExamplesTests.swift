@@ -178,6 +178,65 @@ struct DocumentationExamplesTests {
         #expect(try Data(contentsOf: download.fileURL) == Data("export".utf8))
     }
 
+    @Test("Transfer mocks compile through the transfer protocol without files")
+    func transferMocking() async throws {
+        let mock = MockAPIClient()
+        let client: any APIClientTransferProtocol = mock
+        let uniqueComponent = UUID().uuidString
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-upload-\(uniqueComponent).jpg")
+        let downloadDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mock-downloads-\(uniqueComponent)")
+        let expectedUser = DocumentationUser(
+            id: 42,
+            displayName: "Arthur"
+        )
+
+        await mock.stubUpload(
+            DocumentationUploadAvatarRequest.self,
+            with: HTTPResponse(
+                value: expectedUser,
+                metadata: HTTPResponseMetadata(statusCode: 201)
+            )
+        )
+        await mock.stubDownload(
+            DocumentationExportRequest.self,
+            using: { transfer in
+                DownloadResponse(
+                    fileURL: downloadDirectory.appendingPathComponent(
+                        String(transfer.sequenceID)
+                    ),
+                    metadata: HTTPResponseMetadata(statusCode: 200)
+                )
+            }
+        )
+
+        let upload = try await client.upload(
+            DocumentationUploadAvatarRequest(userID: 42),
+            from: .file(sourceURL)
+        )
+        let firstDownload = try await client.download(
+            DocumentationExportRequest(exportID: "latest")
+        )
+        let secondDownload = try await client.download(
+            DocumentationExportRequest(exportID: "latest")
+        )
+        let transfers = await mock.recordedTransfers
+
+        #expect(upload.value == expectedUser)
+        #expect(firstDownload.fileURL != secondDownload.fileURL)
+        #expect(transfers.map(\.path) == [
+            "users/42/avatar",
+            "exports/latest",
+            "exports/latest"
+        ])
+        #expect(transfers.map(\.operation) == [
+            .upload(.file(sourceURL)),
+            .download(.temporary),
+            .download(.temporary)
+        ])
+    }
+
     @Test("Multipart upload examples compile through the public API")
     func multipartUpload() async throws {
         let capturedRequest = LockedBox<URLRequest?>(nil)

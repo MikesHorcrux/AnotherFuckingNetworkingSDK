@@ -538,6 +538,46 @@ Ordinary value stubs also satisfy response sends with deterministic HTTP `200` m
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
+Transfer services can inject the same mock through `APIClientTransferProtocol`:
+
+```swift
+let transferMock = MockAPIClient()
+let transferClient: any APIClientTransferProtocol = transferMock
+let sourceURL = URL(fileURLWithPath: "/fixtures/avatar.jpg")
+
+await transferMock.stubUpload(
+    UploadAvatarRequest.self,
+    with: HTTPResponse(
+        value: User(id: 42, displayName: "Arthur"),
+        metadata: HTTPResponseMetadata(statusCode: 201)
+    )
+)
+await transferMock.stubDownload(
+    ExportRequest.self,
+    using: { transfer in
+        DownloadResponse(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("mock-download-\(transfer.sequenceID)"),
+            metadata: HTTPResponseMetadata(statusCode: 200)
+        )
+    }
+)
+
+let upload = try await transferClient.upload(
+    UploadAvatarRequest(userID: 42),
+    from: .file(sourceURL)
+)
+let firstDownload = try await transferClient.download(
+    ExportRequest(exportID: "latest")
+)
+let secondDownload = try await transferClient.download(
+    ExportRequest(exportID: "latest")
+)
+let transfers = await transferMock.recordedTransfers
+```
+
+Mock transfers perform no filesystem I/O. A file upload source does not need to exist, download destinations are matched and recorded without being created or replaced, and a `DownloadResponse` returns exactly the URL supplied by its stub. Use a download factory, as above, when repeated temporary downloads need distinct URLs. `recordedTransfers` preserves invocation order and includes the final URL, headers, request body, upload source, or download destination; `clearRecordedTransfers()` clears only those records, while `reset()` clears all stubs and recordings.
+
 WebSocket services can use the same protocol-based pattern with
 `MockWebSocketClient` and `MockWebSocketConnection`:
 
