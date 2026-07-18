@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -124,6 +124,26 @@ struct CreateUserRequest: Request {
 
 Pre-encoded `Data` remains supported through the `body` property.
 
+### Final request customization
+
+Implement `customize(_:)` when an endpoint needs options from `URLRequest` that are intentionally outside the common request surface. The hook runs after the SDK has resolved the URL, merged headers, selected the method, and encoded the body.
+
+```swift
+struct SlowReportRequest: Request {
+    typealias ReturnType = Report
+
+    let path = "reports/annual"
+
+    func customize(_ request: inout URLRequest) throws {
+        request.timeoutInterval = 120
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.allowsCellularAccess = false
+    }
+}
+```
+
+This is also the right place for request signing that must inspect the final method, URL, headers, and body. A thrown error becomes `NetworkError.requestConfigurationFailed`; cancellation remains `CancellationError`.
+
 ## Configurable encoding and decoding
 
 Factories avoid sharing mutable encoder or decoder instances between concurrent requests:
@@ -147,6 +167,38 @@ let client = APIClient(
 ```
 
 A request can override `decode(_:response:using:)` when an endpoint needs nonstandard decoding. A `PaginatedRequest` can similarly override `decodePage(_:response:using:)` for a nonstandard page envelope.
+
+`ReturnType` only needs to be `Sendable`. The SDK supplies JSON decoding automatically when it is also `Decodable`; a request returning another kind of value implements `decode(_:response:using:)` itself.
+
+## Response metadata and raw payloads
+
+Use `sendResponse(_:)` when status, response headers, the final URL, or the original response bytes matter:
+
+```swift
+let response = try await client.sendResponse(GetUserRequest(userID: 42))
+
+print(response.value)
+print(response.statusCode)
+print(response.value(forHTTPHeaderField: "ETag") ?? "no tag")
+print(response.data.count)
+```
+
+Response header names are stored lowercase and looked up case-insensitively. The ordinary `send(_:)` API remains the concise choice when only the decoded value is needed. Metadata-aware services can depend on `any APIClientResponseProtocol`; ordinary services can continue using `any APIClientProtocol`.
+
+For binary or otherwise undecoded bodies, conform to `RawDataRequest`:
+
+```swift
+struct DownloadAvatarRequest: RawDataRequest {
+    let userID: Int
+    var path: String { "users/\(userID)/avatar" }
+}
+
+let imageData = try await client.send(
+    DownloadAvatarRequest(userID: 42)
+)
+```
+
+`RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
 ## Empty responses
 
@@ -216,6 +268,8 @@ do {
         print("The response was not HTTP")
     case .encodingFailed(let underlying):
         print("Could not encode the request: \(underlying)")
+    case .requestConfigurationFailed(let underlying):
+        print("Could not configure the request: \(underlying)")
     case .transport(let urlError):
         print("Transport failed with \(urlError.code)")
     case .requestFailed(let statusCode, let data):
@@ -277,6 +331,8 @@ struct UserService: Sendable {
 }
 ```
 
+Use `any APIClientResponseProtocol` instead when the service calls `sendResponse(_:)` or `sendPageResponse(_:)`. Both `APIClient` and `MockAPIClient` conform.
+
 ## Testing support
 
 Add the testing product only to test targets:
@@ -322,7 +378,7 @@ try await mock.stub(
 )
 ```
 
-Exact-instance registration uses `try await` because the mock constructs the request's final URL and encoded body at registration time. Pass the production base URL and encoder factory to `MockAPIClient` when those values affect matching. Recorded calls include that final URL and body.
+Exact-instance registration uses `try await` because the mock constructs the request's final URL and encoded body at registration time. Pass the production base URL, global headers, and encoder factory to `MockAPIClient` when those values affect matching. Recorded calls include the final URL, headers, and in-memory body.
 
 Paginated responses use the dedicated, compile-time-safe API:
 
@@ -334,6 +390,24 @@ let page = PaginatedResponse(
 )
 await mock.stubPage(ListUsersRequest.self, with: page)
 ```
+
+Metadata-aware stubs use `stubResponse` or `stubPageResponse`:
+
+```swift
+await mock.stubResponse(
+    GetUserRequest.self,
+    with: HTTPResponse(
+        value: expected,
+        data: Data(),
+        metadata: HTTPResponseMetadata(
+            statusCode: 200,
+            headers: ["ETag": "user-42"]
+        )
+    )
+)
+```
+
+Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
@@ -351,12 +425,13 @@ Version 2 is a deliberate major-version modernization:
 - Replace direct `mockDelay` mutation with the `MockAPIClient(delay:sleeper:)` initializer or `await mock.setDelay(_:)`.
 - Expect missing page stubs to throw instead of returning an empty page.
 - Handle `.transport`, `.encodingFailed`, `.invalidResponse`, and `.emptyResponse` in `NetworkError` switches.
+- Handle `.requestConfigurationFailed` when request customization is used.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.
 - Replace the removed general-purpose dictionary merge and nonce helpers with app-owned utilities.
 
-The familiar `send`, `sendPage`, `ReturnType`, `APIClient.shared`, `baseURL`, `globalHeaders`, and pre-encoded `body` APIs remain available.
+The familiar `send`, `sendPage`, `ReturnType`, `APIClient.shared`, `baseURL`, `globalHeaders`, and pre-encoded `body` APIs remain available. `ReturnType` no longer needs to be `Decodable` when a request supplies custom decoding.
 
 ## Development
 
