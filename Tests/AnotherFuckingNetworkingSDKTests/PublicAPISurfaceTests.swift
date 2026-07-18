@@ -59,6 +59,29 @@ struct PublicAPISurfaceTests {
         #expect(decoded == ["value": 1])
     }
 
+    @Test("Activity monitoring remains Sendable and opt-in")
+    func activityMonitoring() async throws {
+        let monitor = NetworkActivityMonitor()
+        requireSendable(monitor)
+        requireSendable(monitor.currentSnapshot)
+
+        let value = try await monitor.track(.request) { "value" }
+
+        #expect(value == "value")
+        #expect(monitor.currentSnapshot.succeededCount == 1)
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    @MainActor
+    @Test("The Observation adapter is publicly constructible")
+    func observationAdapter() {
+        let observable = ObservableNetworkActivity(
+            monitor: NetworkActivityMonitor()
+        )
+        #expect(observable.totalActiveCount == 0)
+        observable.stop()
+    }
+
     @Test("The logger reports non-HTTP responses without raw payloads")
     func nonHTTPLogging() {
         let messages = LockedBox<[String]>([])
@@ -77,3 +100,5 @@ struct PublicAPISurfaceTests {
         #expect(messages.withLock { $0 } == ["Received a non-HTTP response."])
     }
 }
+
+private func requireSendable<T: Sendable>(_ value: T) {}

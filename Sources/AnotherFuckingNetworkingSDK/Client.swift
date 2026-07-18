@@ -83,25 +83,26 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
 
     /// The complete current configuration snapshot.
     public var configuration: Configuration {
-        get { state.withLock { $0 } }
-        set { state.withLock { $0 = newValue } }
+        get { state.withCriticalRegion { $0 } }
+        set { state.withCriticalRegion { $0 = newValue } }
     }
 
     /// The root URL used to resolve request paths.
     public var baseURL: URL? {
-        get { state.withLock { $0.baseURL } }
-        set { state.withLock { $0.baseURL = newValue } }
+        get { state.withCriticalRegion { $0.baseURL } }
+        set { state.withCriticalRegion { $0.baseURL = newValue } }
     }
 
     /// Headers applied to every request unless overridden by a request header.
     public var globalHeaders: [String: String] {
-        get { state.withLock { $0.globalHeaders } }
-        set { state.withLock { $0.globalHeaders = newValue } }
+        get { state.withCriticalRegion { $0.globalHeaders } }
+        set { state.withCriticalRegion { $0.globalHeaders = newValue } }
     }
 
-    private let state: Locked<Configuration>
+    private let state: CriticalState<Configuration>
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
+    private let activityMonitor: NetworkActivityMonitor?
     private let webSocketTransportFactory: WebSocketTransportFactory
 
     public convenience init(
@@ -110,7 +111,8 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
-        logger: NetworkingLogger? = nil
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil
     ) {
         self.init(
             baseURL: baseURL,
@@ -119,6 +121,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
             logger: logger,
+            activityMonitor: activityMonitor,
             webSocketTransportFactory: { session, request, maximumMessageSize in
                 URLSessionWebSocketTransport(
                     session: session,
@@ -136,9 +139,10 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil,
         webSocketTransportFactory: @escaping WebSocketTransportFactory
     ) {
-        state = Locked(
+        state = CriticalState(
             Configuration(
                 baseURL: baseURL,
                 globalHeaders: globalHeaders,
@@ -148,6 +152,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         )
         self.urlSession = urlSession
         self.logger = logger
+        self.activityMonitor = activityMonitor
         self.webSocketTransportFactory = webSocketTransportFactory
     }
 
@@ -155,7 +160,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     public func updateConfiguration(
         _ update: @Sendable (inout Configuration) -> Void
     ) {
-        state.withLock(update)
+        state.withCriticalRegion(update)
     }
 
     /// Opens a WebSocket after its HTTP upgrade handshake succeeds.
@@ -165,8 +170,19 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     public func connect<R: WebSocketRequest>(
         _ request: R
     ) async throws -> any WebSocketConnectionProtocol {
+        guard let activityMonitor else {
+            return try await connectWithoutMonitoring(request)
+        }
+        return try await activityMonitor.track(.webSocketHandshake) {
+            try await self.connectWithoutMonitoring(request)
+        }
+    }
+
+    private func connectWithoutMonitoring<R: WebSocketRequest>(
+        _ request: R
+    ) async throws -> any WebSocketConnectionProtocol {
         try Task.checkCancellation()
-        let configuration = state.withLock { $0 }
+        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try WebSocketRequestBuilder.make(
             request,
             baseURL: configuration.baseURL,
@@ -216,8 +232,19 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     public func sendResponse<R: Request>(
         _ request: R
     ) async throws -> HTTPResponse<R.ReturnType> {
+        guard let activityMonitor else {
+            return try await sendResponseWithoutMonitoring(request)
+        }
+        return try await activityMonitor.track(.request) {
+            try await self.sendResponseWithoutMonitoring(request)
+        }
+    }
+
+    private func sendResponseWithoutMonitoring<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
-        let configuration = state.withLock { $0 }
+        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -253,8 +280,20 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         _ request: R,
         from body: UploadBody
     ) async throws -> HTTPResponse<R.ReturnType> {
+        guard let activityMonitor else {
+            return try await uploadWithoutMonitoring(request, from: body)
+        }
+        return try await activityMonitor.track(.upload) {
+            try await self.uploadWithoutMonitoring(request, from: body)
+        }
+    }
+
+    private func uploadWithoutMonitoring<R: Request>(
+        _ request: R,
+        from body: UploadBody
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
-        let configuration = state.withLock { $0 }
+        let configuration = state.withCriticalRegion { $0 }
 
         let bodySource: RequestBodySource
         switch body {
@@ -296,9 +335,21 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         _ request: R,
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
+        guard let activityMonitor else {
+            return try await downloadWithoutMonitoring(request, to: destination)
+        }
+        return try await activityMonitor.track(.download) {
+            try await self.downloadWithoutMonitoring(request, to: destination)
+        }
+    }
+
+    private func downloadWithoutMonitoring<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination
+    ) async throws -> DownloadResponse {
         try Task.checkCancellation()
         try Self.validateDownloadDestination(destination)
-        let configuration = state.withLock { $0 }
+        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -691,25 +742,5 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
         using decoder: JSONDecoder
     ) throws -> PaginatedResponse<Inner.ReturnType> {
         try wrapped.decodePage(data, response: response, using: decoder)
-    }
-}
-
-// MARK: - Locking
-
-private final class Locked<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-
-    init(_ value: Value) {
-        self.value = value
-    }
-
-    @discardableResult
-    func withLock<Result>(
-        _ operation: (inout Value) throws -> Result
-    ) rethrows -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return try operation(&value)
     }
 }

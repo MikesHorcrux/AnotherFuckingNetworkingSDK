@@ -136,7 +136,8 @@ final class StubSession: @unchecked Sendable {
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
-        logger: NetworkingLogger? = nil
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
@@ -144,7 +145,8 @@ final class StubSession: @unchecked Sendable {
             globalHeaders: globalHeaders,
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
-            logger: logger
+            logger: logger,
+            activityMonitor: activityMonitor
         )
     }
 }

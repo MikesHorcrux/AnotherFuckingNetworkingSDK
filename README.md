@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -410,6 +410,48 @@ do {
 ```
 
 HTTP error bodies are preserved as `Data?` for endpoint-specific decoding. Standard URL failures remain inspectable as `URLError` inside `.transport`.
+
+## Activity streams and Observation
+
+Inject `NetworkActivityMonitor` when an app needs privacy-safe request state.
+Monitoring is opt-in, so clients without a monitor keep the direct request fast
+path. Snapshots contain counts only—never URLs, headers, bodies, or errors—and
+each subscriber uses a newest-only buffer so a slow UI cannot grow memory
+without bound.
+
+```swift
+let monitor = NetworkActivityMonitor()
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    activityMonitor: monitor
+)
+
+let activityTask = Task {
+    for await snapshot in monitor.snapshots() {
+        print(snapshot.totalActiveCount)
+    }
+}
+
+_ = try await client.send(GetUserRequest(userID: 42))
+activityTask.cancel()
+```
+
+The all-platform stream supports the package's iOS 15 and macOS 12 floor. On
+iOS 17 or macOS 14 and newer, `ObservableNetworkActivity` provides a
+main-actor `@Observable` presentation model with separate properties for HTTP
+requests, uploads, downloads, WebSocket handshakes, and outcomes:
+
+```swift
+@MainActor
+func makeActivityModel(
+    for monitor: NetworkActivityMonitor
+) -> ObservableNetworkActivity {
+    ObservableNetworkActivity(monitor: monitor)
+}
+```
+
+Only the small presentation adapter runs on the main actor. URL construction,
+encoding, URLSession work, logging, and decoding remain outside it.
 
 ## Safe request logging
 

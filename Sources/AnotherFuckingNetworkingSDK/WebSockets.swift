@@ -593,14 +593,14 @@ private final class FoundationWebSocketLifecycleDelegate: NSObject,
     @unchecked Sendable {
     typealias Handler = @Sendable (WebSocketTaskEvent) -> Void
 
-    private let handler = WebSocketLocked<Handler?>(nil)
+    private let handler = CriticalState<Handler?>(nil)
 
     // URLSession forwards only task-delegate methods this object does not
     // implement. Each lifecycle callback below is therefore fanned out to the
     // caller's session delegate after the SDK records it.
 
     func setEventHandler(_ handler: @escaping Handler) {
-        self.handler.withLock { $0 = handler }
+        self.handler.withCriticalRegion { $0 = handler }
     }
 
     func urlSession(
@@ -648,7 +648,7 @@ private final class FoundationWebSocketLifecycleDelegate: NSObject,
     }
 
     private func emit(_ event: WebSocketTaskEvent) {
-        handler.withLock { $0 }?(event)
+        handler.withCriticalRegion { $0 }?(event)
     }
 }
 
@@ -680,7 +680,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     private let adapter: any WebSocketTaskAdapter
-    private let lifecycle = WebSocketLocked(LifecycleState())
+    private let lifecycle = CriticalState(LifecycleState())
     private let openContinuation = OneShotContinuation<String?>()
 
     convenience init(
@@ -707,7 +707,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     func open() async throws -> String? {
-        let shouldStart = lifecycle.withLock { state in
+        let shouldStart = lifecycle.withCriticalRegion { state in
             guard !state.openStarted else { return false }
             state.openStarted = true
             return true
@@ -754,7 +754,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
 
     func status() -> WebSocketTransportStatus {
         let taskClose = adapter.closeDetails()
-        return lifecycle.withLock { state -> WebSocketTransportStatus in
+        return lifecycle.withCriticalRegion { state -> WebSocketTransportStatus in
             if let taskClose {
                 state.close = taskClose
                 state.isCompleted = true
@@ -768,7 +768,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
 
     func cancel() {
         let taskClose = adapter.closeDetails()
-        let shouldCancel = lifecycle.withLock { state in
+        let shouldCancel = lifecycle.withCriticalRegion { state in
             if let taskClose {
                 state.close = taskClose
             }
@@ -816,11 +816,11 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     private func handle(_ event: WebSocketTaskEvent) {
         switch event {
         case .opened(let negotiatedSubprotocol):
-            lifecycle.withLock { $0.didOpen = true }
+            lifecycle.withCriticalRegion { $0.didOpen = true }
             openContinuation.resolve(.success(negotiatedSubprotocol))
 
         case .closed(let close):
-            lifecycle.withLock { state in
+            lifecycle.withCriticalRegion { state in
                 state.close = close
                 state.isCompleted = true
             }
@@ -829,7 +829,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
             ))
 
         case .completed(let error):
-            let didOpen = lifecycle.withLock { state in
+            let didOpen = lifecycle.withCriticalRegion { state in
                 state.isCompleted = true
                 return state.didOpen
             }
@@ -844,7 +844,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
             } else if let error {
                 openContinuation.resolve(.failure(error))
             } else {
-                let close = lifecycle.withLock { $0.close }
+                let close = lifecycle.withCriticalRegion { $0.close }
                 openContinuation.resolve(.failure(
                     WebSocketError.connectionClosed(close)
                 ))
@@ -854,7 +854,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
 
     private func markCompleted() {
         let taskClose = adapter.closeDetails()
-        let shouldCancel = lifecycle.withLock { state in
+        let shouldCancel = lifecycle.withCriticalRegion { state in
             state.isCompleted = true
             if let taskClose {
                 state.close = taskClose
@@ -1020,76 +1020,53 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
 
 // MARK: - Concurrency helpers
 
-private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
+private final class OneShotContinuation<Value: Sendable>: Sendable {
     typealias Continuation = CheckedContinuation<Value, any Error>
 
-    private let lock = NSLock()
-    private var continuation: Continuation?
-    private var pendingResult: Result<Value, any Error>?
-    private var isFinished = false
+    private struct State: Sendable {
+        var continuation: Continuation?
+        var pendingResult: Result<Value, any Error>?
+        var isFinished = false
+    }
+
+    private let state = CriticalState(State())
 
     /// Returns `true` when the caller should start the underlying operation.
     func install(_ continuation: Continuation) -> Bool {
-        let pendingResult: Result<Value, any Error>?
-
-        lock.lock()
-        if isFinished {
-            lock.unlock()
-            return false
+        let installation = state.withCriticalRegion { state -> (
+            shouldStart: Bool,
+            pendingResult: Result<Value, any Error>?
+        ) in
+            guard !state.isFinished else { return (false, nil) }
+            if let result = state.pendingResult {
+                state.isFinished = true
+                state.pendingResult = nil
+                return (false, result)
+            }
+            state.continuation = continuation
+            return (true, nil)
         }
-        if let result = self.pendingResult {
-            isFinished = true
-            self.pendingResult = nil
-            pendingResult = result
-        } else {
-            self.continuation = continuation
-            pendingResult = nil
-        }
-        lock.unlock()
 
-        if let pendingResult {
+        if let pendingResult = installation.pendingResult {
             continuation.resume(with: pendingResult)
-            return false
         }
-        return true
+        return installation.shouldStart
     }
 
     func resolve(_ result: Result<Value, any Error>) {
-        let continuation: Continuation?
-
-        lock.lock()
-        if isFinished || pendingResult != nil {
-            lock.unlock()
-            return
+        let continuation = state.withCriticalRegion { state -> Continuation? in
+            guard !state.isFinished, state.pendingResult == nil else {
+                return nil
+            }
+            if let installed = state.continuation {
+                state.isFinished = true
+                state.continuation = nil
+                return installed
+            }
+            state.pendingResult = result
+            return nil
         }
-        if let installed = self.continuation {
-            isFinished = true
-            self.continuation = nil
-            continuation = installed
-        } else {
-            pendingResult = result
-            continuation = nil
-        }
-        lock.unlock()
 
         continuation?.resume(with: result)
-    }
-}
-
-private final class WebSocketLocked<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-
-    init(_ value: Value) {
-        self.value = value
-    }
-
-    @discardableResult
-    func withLock<Result>(
-        _ operation: (inout Value) throws -> Result
-    ) rethrows -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return try operation(&value)
     }
 }
