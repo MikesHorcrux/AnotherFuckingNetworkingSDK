@@ -68,6 +68,7 @@ struct WebSocketLoopbackTests {
         try await withLoopbackTimeout {
             try await connection.ping()
         }
+        await server.waitForPing()
         try await connection.close(code: .normalClosure, reason: "Done")
 
         let close = WebSocketClose(
