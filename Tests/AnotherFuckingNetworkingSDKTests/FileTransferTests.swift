@@ -270,17 +270,26 @@ struct FileTransferTests {
 
     @Test("Destination write failures remain file operation errors")
     func destinationWriteFailure() async throws {
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try Data("downloaded".utf8).write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
         let missingDirectory = uniqueTemporaryURL()
         let destinationURL = missingDirectory.appendingPathComponent("file")
-        let stub = StubSession { request in
-            .respond(try .http(
-                for: request,
-                data: Data("downloaded".utf8)
-            ))
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
         }
+        let client = stub.client(downloadOperation: { request in
+            (
+                ownedDownloadURL,
+                try StubURLProtocol.StubResponse.http(
+                    for: request,
+                    data: Data("downloaded".utf8)
+                ).response
+            )
+        })
 
         do {
-            _ = try await stub.client().download(
+            _ = try await client.download(
                 DownloadFixtureRequest(),
                 to: .file(destinationURL, overwriteExisting: false)
             )
@@ -291,6 +300,7 @@ struct FileTransferTests {
                 return
             }
         }
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
     }
 
     @Test("Explicit overwrite replaces an existing destination")
@@ -314,17 +324,26 @@ struct FileTransferTests {
     @Test("Failed downloads preserve bounded HTTP error bytes")
     func failedDownload() async throws {
         let errorBody = Data(#"{"message":"missing"}"#.utf8)
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try errorBody.write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
         let destinationURL = uniqueTemporaryURL()
-        let stub = StubSession { request in
-            .respond(try .http(
-                for: request,
-                statusCode: 404,
-                data: errorBody
-            ))
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
         }
+        let client = stub.client(downloadOperation: { request in
+            (
+                ownedDownloadURL,
+                try StubURLProtocol.StubResponse.http(
+                    for: request,
+                    statusCode: 404,
+                    data: errorBody
+                ).response
+            )
+        })
 
         do {
-            _ = try await stub.client().download(
+            _ = try await client.download(
                 DownloadFixtureRequest(),
                 to: .file(destinationURL, overwriteExisting: false)
             )
@@ -339,6 +358,73 @@ struct FileTransferTests {
         }
 
         #expect(!FileManager.default.fileExists(atPath: destinationURL.path))
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
+    }
+
+    @Test("Invalid responses discard the owned download file")
+    func invalidResponseDiscardsDownload() async throws {
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try Data("not-http".utf8).write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
+        }
+        let client = stub.client(downloadOperation: { request in
+            let responseURL = try #require(request.url)
+            return (
+                ownedDownloadURL,
+                URLResponse(
+                    url: responseURL,
+                    mimeType: nil,
+                    expectedContentLength: 8,
+                    textEncodingName: nil
+                )
+            )
+        })
+
+        do {
+            _ = try await client.download(DownloadFixtureRequest())
+            Issue.record("Expected a non-HTTP response failure")
+        } catch let error as NetworkError {
+            guard case .invalidResponse = error else {
+                Issue.record("Expected invalidResponse, got \(error)")
+                return
+            }
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
+    }
+
+    @Test("Cancellation before storage discards the owned download file")
+    func cancellationDiscardsDownloadBeforeCommit() async throws {
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try Data("cancelled".utf8).write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
+        }
+        let client = stub.client(downloadOperation: { request in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return (
+                ownedDownloadURL,
+                try StubURLProtocol.StubResponse.http(
+                    for: request,
+                    data: Data("cancelled".utf8)
+                ).response
+            )
+        })
+
+        let task = Task {
+            try await client.download(DownloadFixtureRequest())
+        }
+        do {
+            _ = try await task.value
+            Issue.record("Expected cancellation before file storage")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
     }
 
     @Test("Oversized failed downloads do not load error bodies into memory")

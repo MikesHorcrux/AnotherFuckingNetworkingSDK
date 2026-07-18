@@ -53,6 +53,10 @@ typealias WebSocketTransportFactory = @Sendable (
     WebSocketTransportConfiguration
 ) -> any WebSocketTransport
 
+typealias DownloadOperation = @Sendable (
+    URLRequest
+) async throws -> (URL, URLResponse)
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
@@ -109,6 +113,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     private let logger: NetworkingLogger?
     private let activityMonitor: NetworkActivityMonitor?
     private let fileIOExecutor: FileIOExecutor
+    private let downloadOperation: DownloadOperation
     private let webSocketTransportFactory: WebSocketTransportFactory
 
     public convenience init(
@@ -149,6 +154,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
+        downloadOperation: DownloadOperation? = nil,
         webSocketTransportFactory: @escaping WebSocketTransportFactory
     ) {
         state = CriticalState(
@@ -163,6 +169,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         self.logger = logger
         self.activityMonitor = activityMonitor
         self.fileIOExecutor = fileIOExecutor
+        self.downloadOperation = downloadOperation ?? { request in
+            try await urlSession.download(for: request)
+        }
         self.webSocketTransportFactory = webSocketTransportFactory
     }
 
@@ -344,6 +353,10 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     }
 
     /// Downloads a response body directly to a durable file location.
+    ///
+    /// Cancellation wins before the serialized final-storage phase starts.
+    /// Once destination preflight begins, the storage result wins over a late
+    /// cancellation so a successfully stored file URL is never hidden.
     public func download<R: DownloadRequest>(
         _ request: R,
         to destination: DownloadDestination
@@ -351,7 +364,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         guard let activityMonitor else {
             return try await downloadWithoutMonitoring(request, to: destination)
         }
-        return try await activityMonitor.track(.download) {
+        return try await activityMonitor.trackCommitted(.download) {
             try await self.downloadWithoutMonitoring(request, to: destination)
         }
     }
@@ -376,53 +389,57 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         let temporaryURL: URL
         let response: URLResponse
         do {
-            (temporaryURL, response) = try await urlSession.download(for: urlRequest)
+            (temporaryURL, response) = try await downloadOperation(urlRequest)
         } catch {
             try Self.throwTransportError(error)
         }
 
-        try Task.checkCancellation()
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger?.log(response: response, data: Data())
-            try Task.checkCancellation()
-            throw NetworkError.invalidResponse
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let errorData = try await fileIOExecutor.run {
-                Self.readDownloadErrorData(at: temporaryURL)
-            }
-            logger?.log(response: response, data: errorData ?? Data())
-            try Task.checkCancellation()
-            throw NetworkError.requestFailed(
-                statusCode: httpResponse.statusCode,
-                data: errorData
-            )
-        }
-
-        logger?.log(response: response, data: Data())
-        try Task.checkCancellation()
-        let storedURL: URL
         do {
-            storedURL = try await fileIOExecutor.run {
-                try Self.storeDownloadedFile(
-                    at: temporaryURL,
-                    destination: destination
+            try Task.checkCancellation()
+            guard let httpResponse = response as? HTTPURLResponse else {
+                logger?.log(response: response, data: Data())
+                try Task.checkCancellation()
+                throw NetworkError.invalidResponse
+            }
+
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let errorData = try await fileIOExecutor.run {
+                    Self.readDownloadErrorData(at: temporaryURL)
+                }
+                logger?.log(response: response, data: errorData ?? Data())
+                try Task.checkCancellation()
+                throw NetworkError.requestFailed(
+                    statusCode: httpResponse.statusCode,
+                    data: errorData
                 )
             }
-            try Task.checkCancellation()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as NetworkError {
-            throw error
-        } catch {
-            throw NetworkError.fileOperationFailed(error)
-        }
 
-        return DownloadResponse(
-            fileURL: storedURL,
-            metadata: HTTPResponseMetadata(httpResponse)
-        )
+            logger?.log(response: response, data: Data())
+            try Task.checkCancellation()
+            let storedURL: URL
+            do {
+                storedURL = try await fileIOExecutor.runCommitted {
+                    try Self.storeDownloadedFile(
+                        at: temporaryURL,
+                        destination: destination
+                    )
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as NetworkError {
+                throw error
+            } catch {
+                throw NetworkError.fileOperationFailed(error)
+            }
+
+            return DownloadResponse(
+                fileURL: storedURL,
+                metadata: HTTPResponseMetadata(httpResponse)
+            )
+        } catch {
+            await discardDownloadedFile(at: temporaryURL)
+            throw error
+        }
     }
 
     private enum RequestBodySource: Sendable {
@@ -653,6 +670,12 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             return nil
         }
         return try? Data(contentsOf: url)
+    }
+
+    private func discardDownloadedFile(at url: URL) async {
+        await fileIOExecutor.runCleanup {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private static func decode<R: Request>(

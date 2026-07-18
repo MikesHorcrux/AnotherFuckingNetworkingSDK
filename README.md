@@ -283,10 +283,13 @@ Successful downloads are never loaded into memory. HTTP failure bodies are inclu
 Filesystem validation, bounded error reads, directory creation, moves, and
 replacements run on a dedicated utility queue rather than occupying Swift's
 cooperative executor. Cancellation observed before queued work begins prevents
-the filesystem call. Once an individual move or replacement has started, the
-system call is allowed to reach a consistent result; cancellation is reported
-at the next completion boundary, so callers should still treat destination
-ownership and cleanup as their responsibility.
+the filesystem call. The serialized final-storage phase is the download's
+commit point: once its destination preflight begins, the storage result wins
+over late cancellation so a successfully stored file URL is never hidden.
+Before that point, cancellation, invalid responses, HTTP failures, and storage
+errors trigger a best-effort discard of Foundation's owned temporary file
+without replacing the primary operation error. After a successful return,
+destination ownership and cleanup belong to the caller.
 
 These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
 

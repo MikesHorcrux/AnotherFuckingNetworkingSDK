@@ -82,6 +82,51 @@ struct NetworkActivityTests {
         #expect(monitor.currentSnapshot.totalActiveCount == 0)
     }
 
+    @Test("Committed operations are not post-cancelled by monitoring")
+    func committedOperationWinsLateCancellation() async throws {
+        let monitor = NetworkActivityMonitor()
+
+        let task = Task {
+            try await monitor.trackCommitted(.download) {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return 42
+            }
+        }
+
+        #expect(try await task.value == 42)
+        let snapshot = monitor.currentSnapshot
+        #expect(snapshot.totalActiveCount == 0)
+        #expect(snapshot.succeededCount == 1)
+        #expect(snapshot.cancelledCount == 0)
+        #expect(snapshot.revision == 2)
+    }
+
+    @Test("Monitoring preserves a committed operation failure")
+    func committedOperationFailureWinsLateCancellation() async {
+        let monitor = NetworkActivityMonitor()
+
+        let task = Task {
+            try await monitor.trackCommitted(.download) { () in
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw ActivityFixtureError.failed
+            }
+        }
+
+        do {
+            try await task.value
+            Issue.record("Expected the committed operation failure")
+        } catch let error as ActivityFixtureError {
+            #expect(error == .failed)
+        } catch {
+            Issue.record("Expected ActivityFixtureError, got \(error)")
+        }
+        let snapshot = monitor.currentSnapshot
+        #expect(snapshot.totalActiveCount == 0)
+        #expect(snapshot.failedCount == 1)
+        #expect(snapshot.cancelledCount == 0)
+        #expect(snapshot.revision == 2)
+    }
+
     @Test("Cancelling iteration removes the subscriber")
     func subscriberTermination() async {
         let monitor = NetworkActivityMonitor()

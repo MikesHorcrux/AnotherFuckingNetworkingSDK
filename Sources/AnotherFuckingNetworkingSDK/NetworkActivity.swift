@@ -154,16 +154,47 @@ public final class NetworkActivityMonitor: Sendable {
         _ kind: NetworkOperationKind,
         operation: @Sendable () async throws -> Value
     ) async throws -> Value {
+        try await track(
+            kind,
+            cancellationWinsAfterOperation: true,
+            operation: operation
+        )
+    }
+
+    /// Tracks an operation whose successful return follows an irreversible
+    /// commit point. The operation remains responsible for cancellation before
+    /// that point; a late cancellation cannot turn committed success into a
+    /// failure that hides the resulting resource.
+    func trackCommitted<Value: Sendable>(
+        _ kind: NetworkOperationKind,
+        operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await track(
+            kind,
+            cancellationWinsAfterOperation: false,
+            operation: operation
+        )
+    }
+
+    private func track<Value: Sendable>(
+        _ kind: NetworkOperationKind,
+        cancellationWinsAfterOperation: Bool,
+        operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
         try Task.checkCancellation()
         let token = begin(kind)
 
         do {
             let value = try await operation()
-            try Task.checkCancellation()
+            if cancellationWinsAfterOperation {
+                try Task.checkCancellation()
+            }
             finish(token, outcome: .succeeded)
             return value
         } catch {
-            if Task.isCancelled || error is CancellationError {
+            let cancellationWon = error is CancellationError
+                || (cancellationWinsAfterOperation && Task.isCancelled)
+            if cancellationWon {
                 finish(token, outcome: .cancelled)
                 throw CancellationError()
             }

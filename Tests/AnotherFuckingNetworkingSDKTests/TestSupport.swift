@@ -137,7 +137,9 @@ final class StubSession: @unchecked Sendable {
         encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
-        activityMonitor: NetworkActivityMonitor? = nil
+        activityMonitor: NetworkActivityMonitor? = nil,
+        fileIOExecutor: FileIOExecutor = .shared,
+        downloadOperation: DownloadOperation? = nil
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
@@ -146,7 +148,19 @@ final class StubSession: @unchecked Sendable {
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
             logger: logger,
-            activityMonitor: activityMonitor
+            activityMonitor: activityMonitor,
+            fileIOExecutor: fileIOExecutor,
+            downloadOperation: downloadOperation,
+            webSocketTransportFactory: {
+                session, request, configuration in
+                URLSessionWebSocketTransport(
+                    session: session,
+                    request: request,
+                    maximumMessageSize: configuration.maximumMessageSize,
+                    inboundBufferingPolicy:
+                        configuration.inboundBufferingPolicy
+                )
+            }
         )
     }
 }

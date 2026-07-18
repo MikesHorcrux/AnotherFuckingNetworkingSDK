@@ -66,6 +66,81 @@ struct FileIOExecutorTests {
         }
     }
 
+    @Test("A started committed mutation wins over late cancellation")
+    func committedWorkWinsRunningCancellation() async throws {
+        let queue = DispatchQueue(label: "file-io-committed-running")
+        let executor = FileIOExecutor(queue: queue)
+        let releaseWork = DispatchSemaphore(value: 0)
+        let workStarted = LockedBox(false)
+
+        let task = Task {
+            try await executor.runCommitted {
+                workStarted.withLock { $0 = true }
+                releaseWork.wait()
+                return 42
+            }
+        }
+        await waitUntil { workStarted.withLock { $0 } }
+
+        task.cancel()
+        releaseWork.signal()
+
+        #expect(try await task.value == 42)
+    }
+
+    @Test("A cancelled queued committed mutation never starts")
+    func committedQueuedCancellation() async throws {
+        let queue = DispatchQueue(label: "file-io-committed-queued")
+        let executor = FileIOExecutor(queue: queue)
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        let blockerStarted = LockedBox(false)
+        let cancelledWorkRan = LockedBox(false)
+
+        let blocker = Task {
+            try await executor.runCommitted {
+                blockerStarted.withLock { $0 = true }
+                releaseBlocker.wait()
+            }
+        }
+        await waitUntil { blockerStarted.withLock { $0 } }
+
+        let cancelled = Task {
+            try await executor.runCommitted {
+                cancelledWorkRan.withLock { $0 = true }
+            }
+        }
+        await Task.yield()
+        cancelled.cancel()
+        releaseBlocker.signal()
+
+        try await blocker.value
+        do {
+            try await cancelled.value
+            Issue.record("Expected queued committed-work cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(cancelledWorkRan.withLock { $0 } == false)
+    }
+
+    @Test("Cleanup runs even when its awaiting task is cancelled")
+    func cleanupIgnoresCancellation() async {
+        let executor = FileIOExecutor(
+            queue: DispatchQueue(label: "file-io-cancelled-cleanup")
+        )
+        let cleanupRan = LockedBox(false)
+
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await executor.runCleanup {
+                cleanupRan.withLock { $0 = true }
+            }
+        }
+
+        await task.value
+        #expect(cleanupRan.withLock { $0 })
+    }
+
     @Test("Filesystem errors remain inspectable")
     func errorPassthrough() async {
         let executor = FileIOExecutor(
