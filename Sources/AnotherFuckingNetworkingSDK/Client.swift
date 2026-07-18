@@ -617,7 +617,24 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             let bytes: URLSession.AsyncBytes
             let response: URLResponse
             do {
-                (bytes, response) = try await urlSession.bytes(for: urlRequest)
+                let metricsDelegate: DataTaskMetricsDelegate?
+                if let telemetry {
+                    metricsDelegate = DataTaskMetricsDelegate(
+                        attempt: attempt
+                    ) { [telemetry] attempt, snapshot in
+                        telemetry.emit(
+                            phase: .taskMetrics,
+                            attempt: attempt,
+                            taskMetrics: snapshot
+                        )
+                    }
+                } else {
+                    metricsDelegate = nil
+                }
+                (bytes, response) = try await urlSession.bytes(
+                    for: urlRequest,
+                    delegate: metricsDelegate
+                )
             } catch {
                 let networkError = try Self.mappedTransportError(error)
                 telemetry?.emit(

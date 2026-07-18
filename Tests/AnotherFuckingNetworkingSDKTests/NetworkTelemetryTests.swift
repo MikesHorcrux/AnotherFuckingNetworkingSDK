@@ -89,6 +89,12 @@ struct NetworkTelemetryTests {
 
         #expect(events.withLock { $0.last?.phase } == .succeeded)
         #expect(events.withLock { $0.last?.durationNanoseconds } != nil)
+        let metrics = events.withLock { events in
+            events.filter { $0.phase == .taskMetrics }
+        }
+        #expect(metrics.count == 1)
+        #expect(metrics.first?.attempt == 1)
+        #expect(metrics.first?.taskMetrics != nil)
     }
 
     @Test("Transfer telemetry collects task metrics without progress callbacks")
