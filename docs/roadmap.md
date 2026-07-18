@@ -51,6 +51,8 @@ roadmap item is not a shipped feature.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.
+- Actor-isolated keyed circuit breaking with bounded half-open recovery,
+  cancellation preservation, and injectable failure classification.
 - Optional NetworkPathMonitor snapshots for connectivity-aware UI and policy;
   transport requests remain non-blocking.
 

@@ -237,6 +237,25 @@ This is single-flight only: completed responses are not retained, and cancelled
 waiters do not cancel work still needed by other callers. See
 [Request coalescing](docs/request-coalescing.md) for lifecycle details.
 
+For repeated endpoint failures, add an actor-isolated circuit breaker around
+the response client:
+
+~~~swift
+let breaker = CircuitBreaker(
+    policy: .init(failureThreshold: 3, resetTimeoutNanoseconds: 10_000_000_000)
+)
+let resilientClient = CircuitBreakingAPIClient(
+    client: client,
+    breaker: breaker,
+    keyProvider: { request in request.path }
+)
+~~~
+
+The breaker opens after the configured failures, permits one half-open probe
+after the cooldown, and preserves cancellation. Use a key that includes auth
+scope and other response-varying inputs; return `nil` only for operations that
+must bypass suppression. See [Circuit breaker](docs/circuit-breaker.md).
+
 For bounded response reuse, add `CachedAPIClient` with a caller-owned key and
 explicit TTL/size limits. It stores only successful responses and never
 invalidates mutations implicitly; call `invalidate(_:)` after a write. See

@@ -85,6 +85,9 @@ Policies are values or wrappers, not hidden global switches:
 - `CachedAPIClient` and `ConditionalCachedAPIClient` provide bounded,
   caller-keyed response reuse; the conditional decorator owns validator
   revalidation without imposing cache semantics on the base client.
+- `CircuitBreakingAPIClient` composes actor-isolated keyed failure suppression
+  around response operations; injected clocks and classifiers keep cooldown and
+  trip semantics deterministic and policy-owned.
 - `BackgroundURLSessionAdapter` translates platform delegate callbacks while
   `TransferJobCoordinator` remains the durable state owner.
 - `BackgroundTransferLifecycleCoordinator` composes the actor-isolated router

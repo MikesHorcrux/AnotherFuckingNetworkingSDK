@@ -87,6 +87,9 @@ source and tests before relying on any example below.
 - Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and
   `ResponseCachePolicy`; bounded caller-keyed TTL/LRU storage, optional
   validator revalidation, and explicit invalidation.
+- Circuit breaking: `CircuitBreaker` and `CircuitBreakingAPIClient`; use
+  caller-owned keys, classify only failures that should suppress an endpoint,
+  preserve cancellation, and inject a clock for deterministic cooldown tests.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
