@@ -29,6 +29,16 @@ public package compiles and links for the device architecture, but it does not
 exercise URLSession delegates, protected files, radio transitions, or process
 relaunch.
 
+## Current device availability check
+
+On 2026-07-18, CoreDevice reported the paired iPad as physically present but
+locked, with its developer tunnel disconnected. `xcodebuild` therefore timed
+out while preparing the destination and did not produce a new device runtime
+result. The paired iPhone was reported unavailable. This is a device-state
+limitation, not a package compilation failure; retry the device build and the
+signed host-app scenarios after the device is unlocked and the developer
+tunnel is connected.
+
 ## Release interpretation
 
 The SDK is ready for merge-level source, strict-concurrency, simulator, and
