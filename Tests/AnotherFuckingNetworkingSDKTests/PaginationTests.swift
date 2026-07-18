@@ -124,6 +124,31 @@ struct PaginationTests {
         #expect(capturedURL.withLock { $0 }?.absoluteString.contains("/folders%2F42?") == true)
         #expect(capturedURL.withLock { $0 }?.absoluteString.contains("%252F") == false)
     }
+
+    @Test("Pagination runs final request customization after adding page items")
+    func requestCustomization() async throws {
+        let capturedQueryHeader = LockedBox<String?>(nil)
+        let body = Data(#"{"items":[],"currentPage":2,"totalPages":2}"#.utf8)
+        let stub = StubSession { request in
+            capturedQueryHeader.withLock {
+                $0 = request.value(forHTTPHeaderField: "X-Final-Query")
+            }
+            return .respond(try .http(
+                for: request,
+                statusCode: 206,
+                headers: ["X-Page-Source": "fixture"],
+                data: body
+            ))
+        }
+
+        let response = try await stub.client().sendPageResponse(
+            CustomizedPageRequest()
+        )
+
+        #expect(capturedQueryHeader.withLock { $0 } == "filter=active&page=2&pageSize=10")
+        #expect(response.statusCode == 206)
+        #expect(response.value(forHTTPHeaderField: "x-page-source") == "fixture")
+    }
 }
 
 private struct UserPageRequest: PaginatedRequest {
@@ -222,16 +247,52 @@ private struct PercentEncodedPageRequest: PaginatedRequest {
     let pathEncoding = RequestPathEncoding.percentEncoded
 }
 
+private struct CustomizedPageRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    let page = 2
+    let pageSize = 10
+    let path = "customized-page"
+    let queryItems: [URLQueryItem]? = [
+        URLQueryItem(name: "filter", value: "active")
+    ]
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        urlRequest.setValue(
+            urlRequest.url?.query,
+            forHTTPHeaderField: "X-Final-Query"
+        )
+    }
+}
+
 /// Calls the protocol's default URL builder from a custom implementation.
 private enum RequestURLBuilder {
     private struct Wrapped<R: Request>: Request {
         typealias ReturnType = R.ReturnType
         let request: R
         var path: String { request.path }
+        var pathEncoding: RequestPathEncoding { request.pathEncoding }
         var method: HTTPMethod { request.method }
         var queryItems: [URLQueryItem]? { request.queryItems }
         var body: Data? { request.body }
         var headers: [String: String]? { request.headers }
+        var allowsEmptyResponseBody: Bool { request.allowsEmptyResponseBody }
+
+        func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try request.makeBody(using: encoder)
+        }
+
+        func customize(_ urlRequest: inout URLRequest) throws {
+            try request.customize(&urlRequest)
+        }
+
+        func decode(
+            _ data: Data,
+            response: HTTPURLResponse,
+            using decoder: JSONDecoder
+        ) throws -> R.ReturnType {
+            try request.decode(data, response: response, using: decoder)
+        }
     }
 
     static func makeURL<R: Request>(for request: R, baseURL: URL) -> URL? {

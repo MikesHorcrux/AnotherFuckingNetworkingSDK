@@ -112,6 +112,42 @@ struct DocumentationExamplesTests {
         #expect(response == EmptyResponse())
         #expect(documentationMessage(for: .invalidURL) == "Invalid URL")
     }
+
+    @Test("Response metadata, raw data, and final customization examples compile")
+    func responseCapabilities() async throws {
+        let capturedTimeout = LockedBox<TimeInterval?>(nil)
+        let body = Data([0x01, 0x02, 0x03])
+        let stub = StubSession { request in
+            capturedTimeout.withLock { $0 = request.timeoutInterval }
+            return .respond(try .http(
+                for: request,
+                headers: ["ETag": "avatar-42"],
+                data: body
+            ))
+        }
+        let client: any APIClientResponseProtocol = stub.client()
+
+        let response = try await client.sendResponse(
+            DocumentationRawRequest(userID: 42)
+        )
+
+        #expect(response.value == body)
+        #expect(response.data == body)
+        #expect(response.value(forHTTPHeaderField: "etag") == "avatar-42")
+        #expect(capturedTimeout.withLock { $0 } == 120)
+
+        let mock = MockAPIClient()
+        await mock.stubResponse(
+            DocumentationGetUserRequest.self,
+            with: HTTPResponse(
+                value: DocumentationUser(id: 42, displayName: "Arthur"),
+                metadata: HTTPResponseMetadata(statusCode: 200)
+            )
+        )
+        #expect(try await mock.sendResponse(
+            DocumentationGetUserRequest(userID: 42)
+        ).statusCode == 200)
+    }
 }
 
 private func documentationMessage(for error: NetworkError) -> String {
@@ -122,6 +158,8 @@ private func documentationMessage(for error: NetworkError) -> String {
         return "Invalid response"
     case .encodingFailed:
         return "Encoding failed"
+    case .requestConfigurationFailed:
+        return "Request configuration failed"
     case .transport:
         return "Transport failed"
     case .requestFailed(let statusCode, _):
@@ -184,6 +222,15 @@ private struct DocumentationDeleteUserRequest: Request {
     let userID: Int
     var path: String { "users/\(userID)" }
     let method = HTTPMethod.delete
+}
+
+private struct DocumentationRawRequest: RawDataRequest {
+    let userID: Int
+    var path: String { "users/\(userID)/avatar" }
+
+    func customize(_ request: inout URLRequest) throws {
+        request.timeoutInterval = 120
+    }
 }
 
 private struct DocumentationUserService: Sendable {

@@ -65,6 +65,114 @@ struct APIClientTransportTests {
         #expect(result == TestUser(id: 42, displayName: "Custom"))
     }
 
+    @Test("Response sends preserve status, headers, URL, and raw bytes")
+    func responseMetadata() async throws {
+        let body = Data(#"{"id":42,"displayName":"Arthur"}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 201,
+                headers: ["X-RateLimit-Remaining": "9"],
+                data: body
+            ))
+        }
+        let client: any APIClientResponseProtocol = stub.client()
+
+        let response = try await client.sendResponse(GetUserRequest(id: 42))
+
+        #expect(response.value == TestUser(id: 42, displayName: "Arthur"))
+        #expect(response.data == body)
+        #expect(response.statusCode == 201)
+        #expect(response.url == stub.baseURL.appendingPathComponent("users/42"))
+        #expect(response.headers["x-ratelimit-remaining"] == "9")
+        #expect(response.value(forHTTPHeaderField: "X-RATELIMIT-REMAINING") == "9")
+    }
+
+    @Test("Raw requests return bytes without JSON decoding")
+    func rawData() async throws {
+        let body = Data([0x00, 0x01, 0xFE, 0xFF])
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: body))
+        }
+
+        let response = try await stub.client().sendResponse(RawFixtureRequest())
+
+        #expect(response.value == body)
+        #expect(response.data == body)
+    }
+
+    @Test("Raw requests accept empty successful bodies", arguments: [200, 204, 205])
+    func emptyRawData(statusCode: Int) async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, statusCode: statusCode))
+        }
+
+        let data = try await stub.client().send(RawFixtureRequest())
+
+        #expect(data.isEmpty)
+    }
+
+    @Test("Custom decoders may return non-Decodable values")
+    func nonDecodableReturnType() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("answer".utf8)))
+        }
+
+        let value = try await stub.client().send(PlainValueRequest())
+
+        #expect(value == PlainValue(text: "answer"))
+    }
+
+    @Test("Request customization sees and can refine the prepared URLRequest")
+    func requestCustomization() async throws {
+        let captured = LockedBox<URLRequest?>(nil)
+        let body = Data(#"{"id":1,"displayName":"Ford"}"#.utf8)
+        let stub = StubSession { request in
+            captured.withLock { $0 = request }
+            return .respond(try .http(for: request, data: body))
+        }
+        let client = stub.client(globalHeaders: ["X-Global": "present"])
+
+        _ = try await client.send(CustomizedRequest())
+
+        let request = try #require(captured.withLock { $0 })
+        #expect(request.httpMethod == "POST")
+        #expect(request.timeoutInterval == 7)
+        #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+        #expect(request.value(forHTTPHeaderField: "X-Global") == "present")
+        #expect(request.value(forHTTPHeaderField: "X-Request") == "prepared")
+        #expect(request.value(forHTTPHeaderField: "X-Signature") == "POST:payload")
+        #expect(requestBodyData(request) == Data("payload".utf8))
+    }
+
+    @Test("Request customization errors remain typed")
+    func requestCustomizationFailure() async throws {
+        let client = APIClient(baseURL: URL(string: "https://example.com"))
+
+        do {
+            _ = try await client.send(FailingCustomizationRequest())
+            Issue.record("Expected customization to fail")
+        } catch let error as NetworkError {
+            guard case .requestConfigurationFailed(let underlying) = error else {
+                Issue.record("Expected requestConfigurationFailed, got \(error)")
+                return
+            }
+            #expect(underlying is CustomizationFixtureError)
+        }
+    }
+
+    @Test("Cancellation thrown during request customization is preserved")
+    func requestCustomizationCancellation() async throws {
+        let client = APIClient(baseURL: URL(string: "https://example.com"))
+
+        do {
+            _ = try await client.send(CancellingCustomizationRequest())
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
     @Test("Request-specific headers override defaults case-insensitively")
     func caseInsensitiveHeaderOverride() async throws {
         let capturedAuthorization = LockedBox<String?>(nil)
@@ -505,5 +613,64 @@ private struct CustomDecodingRequest: Request {
     ) throws -> TestUser {
         let id = try #require(Int(String(decoding: data, as: UTF8.self)))
         return TestUser(id: id, displayName: "Custom")
+    }
+}
+
+private struct RawFixtureRequest: RawDataRequest {
+    let path = "raw"
+}
+
+private struct PlainValue: Equatable, Sendable {
+    let text: String
+}
+
+private struct PlainValueRequest: Request {
+    typealias ReturnType = PlainValue
+    let path = "plain"
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PlainValue {
+        PlainValue(text: String(decoding: data, as: UTF8.self))
+    }
+}
+
+private struct CustomizedRequest: Request {
+    typealias ReturnType = TestUser
+    let path = "customized"
+    let method = HTTPMethod.post
+    let body: Data? = Data("payload".utf8)
+    let headers: [String: String]? = ["X-Request": "prepared"]
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        let method = urlRequest.httpMethod ?? "missing"
+        let body = String(decoding: urlRequest.httpBody ?? Data(), as: UTF8.self)
+        urlRequest.timeoutInterval = 7
+        urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        urlRequest.setValue("\(method):\(body)", forHTTPHeaderField: "X-Signature")
+    }
+}
+
+private enum CustomizationFixtureError: Error {
+    case expected
+}
+
+private struct FailingCustomizationRequest: Request {
+    typealias ReturnType = EmptyResponse
+    let path = "customization-failure"
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        throw CustomizationFixtureError.expected
+    }
+}
+
+private struct CancellingCustomizationRequest: Request {
+    typealias ReturnType = EmptyResponse
+    let path = "customization-cancellation"
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        throw CancellationError()
     }
 }

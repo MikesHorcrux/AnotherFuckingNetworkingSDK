@@ -29,6 +29,7 @@ public enum NetworkError: LocalizedError, Sendable {
     case invalidURL
     case invalidResponse
     case encodingFailed(any Error)
+    case requestConfigurationFailed(any Error)
     case transport(URLError)
     case requestFailed(statusCode: Int, data: Data?)
     case emptyResponse(statusCode: Int)
@@ -43,6 +44,8 @@ public enum NetworkError: LocalizedError, Sendable {
             return "The server returned a non-HTTP response."
         case .encodingFailed(let error):
             return "The request body could not be encoded: \(error.localizedDescription)"
+        case .requestConfigurationFailed(let error):
+            return "The URL request could not be configured: \(error.localizedDescription)"
         case .transport(let error):
             return "The request failed before receiving a response: \(error.localizedDescription)"
         case .requestFailed(let statusCode, _):
@@ -61,7 +64,7 @@ public enum NetworkError: LocalizedError, Sendable {
 
 /// A type-safe description of an HTTP request and its decoded response.
 public protocol Request: Sendable {
-    associatedtype ReturnType: Decodable & Sendable
+    associatedtype ReturnType: Sendable
 
     /// The endpoint path relative to the client's base URL.
     var path: String { get }
@@ -85,11 +88,22 @@ public protocol Request: Sendable {
     /// case-insensitively.
     var headers: [String: String]? { get }
 
+    /// Whether a successful response with no body should be passed to
+    /// ``decode(_:response:using:)``. The default is `false`.
+    var allowsEmptyResponseBody: Bool { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
     /// Builds the body using a fresh encoder from the client configuration.
     func makeBody(using encoder: JSONEncoder) throws -> Data?
+
+    /// Applies final request-specific URL loading options.
+    ///
+    /// This hook runs after the client has set the URL, method, merged headers,
+    /// and encoded body. Use it for options such as cache policy, timeout,
+    /// cookie handling, or network access constraints.
+    func customize(_ urlRequest: inout URLRequest) throws
 
     /// Decodes a successful response using a fresh decoder from the client configuration.
     func decode(
@@ -105,6 +119,7 @@ public extension Request {
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
+    var allowsEmptyResponseBody: Bool { false }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
@@ -154,13 +169,7 @@ public extension Request {
         body
     }
 
-    func decode(
-        _ data: Data,
-        response: HTTPURLResponse,
-        using decoder: JSONDecoder
-    ) throws -> ReturnType {
-        try decoder.decode(ReturnType.self, from: data)
-    }
+    func customize(_ urlRequest: inout URLRequest) throws {}
 
     private static func isValidPercentEncodedPath(_ path: String) -> Bool {
         let scalars = Array(path.unicodeScalars)
@@ -195,6 +204,112 @@ public extension Request {
     }
 }
 
+public extension Request where ReturnType: Decodable {
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> ReturnType {
+        try decoder.decode(ReturnType.self, from: data)
+    }
+}
+
+// MARK: - RawDataRequest
+
+/// A request whose successful response body is returned without JSON decoding.
+///
+/// Empty successful bodies are returned as empty `Data` rather than producing
+/// ``NetworkError/emptyResponse(statusCode:)``.
+public protocol RawDataRequest: Request where ReturnType == Data {}
+
+public extension RawDataRequest {
+    var allowsEmptyResponseBody: Bool { true }
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> Data {
+        data
+    }
+}
+
+// MARK: - HTTP response metadata
+
+/// Stable, `Sendable` metadata from an HTTP response.
+public struct HTTPResponseMetadata: Equatable, Sendable {
+    public let statusCode: Int
+    public let url: URL?
+
+    /// Response headers keyed by lowercase field name.
+    public let headers: [String: String]
+
+    public init(
+        statusCode: Int,
+        url: URL? = nil,
+        headers: [String: String] = [:]
+    ) {
+        self.statusCode = statusCode
+        self.url = url
+        self.headers = Self.normalizedHeaders(headers)
+    }
+
+    /// Returns a header value using case-insensitive field-name matching.
+    public func value(forHTTPHeaderField name: String) -> String? {
+        headers[name.lowercased()]
+    }
+
+    init(_ response: HTTPURLResponse) {
+        var headers: [String: String] = [:]
+        for (name, value) in response.allHeaderFields {
+            headers[String(describing: name).lowercased()] = String(describing: value)
+        }
+
+        self.init(
+            statusCode: response.statusCode,
+            url: response.url,
+            headers: headers
+        )
+    }
+
+    private static func normalizedHeaders(
+        _ headers: [String: String]
+    ) -> [String: String] {
+        var normalized: [String: String] = [:]
+        for name in headers.keys.sorted() {
+            normalized[name.lowercased()] = headers[name]
+        }
+        return normalized
+    }
+}
+
+/// A decoded value together with the status, URL, and headers that produced it.
+public struct HTTPResponse<Value: Sendable>: Sendable {
+    public let value: Value
+    public let data: Data
+    public let metadata: HTTPResponseMetadata
+
+    public init(
+        value: Value,
+        data: Data = Data(),
+        metadata: HTTPResponseMetadata
+    ) {
+        self.value = value
+        self.data = data
+        self.metadata = metadata
+    }
+
+    public var statusCode: Int { metadata.statusCode }
+    public var url: URL? { metadata.url }
+    public var headers: [String: String] { metadata.headers }
+
+    public func value(forHTTPHeaderField name: String) -> String? {
+        metadata.value(forHTTPHeaderField: name)
+    }
+}
+
+extension HTTPResponse: Equatable where Value: Equatable {}
+
 private extension Unicode.Scalar {
     var isASCIIHexDigit: Bool {
         switch value {
@@ -220,7 +335,7 @@ public struct EmptyResponse: Decodable, Equatable, Sendable {
 // MARK: - Pagination
 
 /// A page-number-based request.
-public protocol PaginatedRequest: Request {
+public protocol PaginatedRequest: Request where ReturnType: Decodable {
     var page: Int { get }
     var pageSize: Int { get }
 
