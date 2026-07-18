@@ -157,6 +157,48 @@ struct WebSocketRequestBuilderTests {
         }
     }
 
+    @Test("Inbound buffering limits must be positive")
+    func inboundBufferingValidation() {
+        let policies = [
+            WebSocketInboundBufferingPolicy(
+                maximumMessages: 0,
+                maximumBytes: 1
+            ),
+            WebSocketInboundBufferingPolicy(
+                maximumMessages: 1,
+                maximumBytes: 0
+            ),
+            WebSocketInboundBufferingPolicy(
+                maximumMessages: -1,
+                maximumBytes: -1
+            ),
+        ]
+
+        for policy in policies {
+            let error = requireWebSocketError {
+                try WebSocketRequestBuilder.make(
+                    WebSocketFixtureRequest(
+                        inboundBufferingPolicy: policy
+                    ),
+                    baseURL: URL(string: "https://example.com"),
+                    globalHeaders: [:]
+                )
+            }
+            guard case .invalidInboundBufferingPolicy(let actual)? = error else {
+                Issue.record(
+                    "Expected invalidInboundBufferingPolicy, got \(String(describing: error))"
+                )
+                continue
+            }
+            #expect(actual == policy)
+        }
+
+        #expect(WebSocketInboundBufferingPolicy.default == .init(
+            maximumMessages: 64,
+            maximumBytes: 8 * 1_024 * 1_024
+        ))
+    }
+
     @Test("Subprotocols must be unique WebSocket tokens")
     func subprotocolValidation() {
         for value in ["", "chat protocol", "chat,json", "café"] {
@@ -358,6 +400,10 @@ struct WebSocketRequestBuilderTests {
 struct APIClientWebSocketTests {
     @Test("Connect builds the handshake and waits for transport open")
     func connectRequestAndOpen() async throws {
+        let bufferingPolicy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 12,
+            maximumBytes: 32_768
+        )
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         let capturedInput = LockedBox<CapturedWebSocketFactoryInput?>(nil)
@@ -370,12 +416,12 @@ struct APIClientWebSocketTests {
                 "Authorization": "global-token",
                 "X-Global": "global-value"
             ],
-            webSocketTransportFactory: { session, request, maximumSize in
+            webSocketTransportFactory: { session, request, configuration in
                 capturedInput.withLock {
                     $0 = CapturedWebSocketFactoryInput(
                         session: session,
                         request: request,
-                        maximumMessageSize: maximumSize
+                        configuration: configuration
                     )
                 }
                 return transport
@@ -392,6 +438,7 @@ struct APIClientWebSocketTests {
                 ],
                 subprotocols: ["chat.v2"],
                 maximumMessageSize: 4_096,
+                inboundBufferingPolicy: bufferingPolicy,
                 customization: .valid
             ))
         }
@@ -400,7 +447,8 @@ struct APIClientWebSocketTests {
         #expect(didFinish.withLock { $0 } == false)
         let captured = try #require(capturedInput.withLock { $0 })
         #expect(captured.session === session)
-        #expect(captured.maximumMessageSize == 4_096)
+        #expect(captured.configuration.maximumMessageSize == 4_096)
+        #expect(captured.configuration.inboundBufferingPolicy == bufferingPolicy)
         #expect(captured.request.url?.absoluteString
             == "wss://example.com/api/live%20feed?locale=en&room=42")
         #expect(captured.request.httpMethod == "GET")
@@ -495,6 +543,37 @@ struct APIClientWebSocketTests {
             #expect(error is CancellationError)
         }
         #expect(transport.snapshot.cancelCount == 1)
+    }
+
+    @Test("Connect snapshots mutable transport options exactly once")
+    func connectSnapshotsTransportOptions() async throws {
+        let expectedPolicy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 7,
+            maximumBytes: 4_096
+        )
+        let request = AlternatingWebSocketTransportOptionsRequest(
+            firstMaximumMessageSize: 2_048,
+            firstBufferingPolicy: expectedPolicy
+        )
+        let capturedConfiguration = LockedBox<
+            WebSocketTransportConfiguration?
+        >(nil)
+        let transport = FakeWebSocketTransport()
+        let client = APIClient(
+            baseURL: URL(string: "https://example.com"),
+            webSocketTransportFactory: { _, _, configuration in
+                capturedConfiguration.withLock { $0 = configuration }
+                return transport
+            }
+        )
+
+        _ = try await client.connect(request)
+
+        let captured = try #require(capturedConfiguration.withLock { $0 })
+        #expect(captured.maximumMessageSize == 2_048)
+        #expect(captured.inboundBufferingPolicy == expectedPolicy)
+        #expect(request.readCounts.maximumMessageSize == 1)
+        #expect(request.readCounts.inboundBufferingPolicy == 1)
     }
 }
 
@@ -726,11 +805,287 @@ struct URLSessionWebSocketTransportTests {
 
         let snapshot = adapter.snapshot
         #expect(snapshot.sentMessages == [.text("hello")])
-        #expect(snapshot.receiveCount == 1)
+        #expect(snapshot.receiveCount == 2)
         #expect(snapshot.pingCount == 1)
         #expect(snapshot.closes.count == 1)
         #expect(snapshot.closes.first?.code == .normalClosure)
         #expect(snapshot.closes.first?.reason == Data("finished".utf8))
+    }
+
+    @Test("The receive pump starts on open and prefetches FIFO")
+    func receivePumpPrefetchesFIFO() async throws {
+        let expected: [WebSocketMessage] = [
+            .text("first"),
+            .binary(Data([0x02, 0x03])),
+            .text("third"),
+        ]
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil),
+            receiveResults: expected.map { .success($0) }
+        )
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+
+        _ = try await transport.open()
+        #expect(adapter.snapshot.receiveCount == expected.count + 1)
+
+        var received: [WebSocketMessage] = []
+        for _ in expected {
+            received.append(try await transport.receive())
+        }
+        #expect(received == expected)
+        #expect(adapter.snapshot.receiveCount == expected.count + 1)
+    }
+
+    @Test("Asynchronous receive callbacks rearm exactly once")
+    func asynchronousReceiveCallbacksRearm() async throws {
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil)
+        )
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+        _ = try await transport.open()
+        #expect(adapter.snapshot.receiveCount == 1)
+
+        adapter.completeReceive(.success(.text("first")))
+        #expect(adapter.snapshot.receiveCount == 2)
+        adapter.completeReceive(.success(.text("second")))
+        #expect(adapter.snapshot.receiveCount == 3)
+
+        #expect(try await transport.receive() == .text("first"))
+        #expect(try await transport.receive() == .text("second"))
+        #expect(adapter.snapshot.receiveCount == 3)
+    }
+
+    @Test("A waiting receiver gets direct delivery before the pump rearms")
+    func pendingReceiverGetsDirectDelivery() async throws {
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil)
+        )
+        let transport = URLSessionWebSocketTransport(
+            adapter: adapter,
+            inboundBufferingPolicy: .init(
+                maximumMessages: 1,
+                maximumBytes: 1
+            )
+        )
+        _ = try await transport.open()
+        #expect(adapter.snapshot.receiveCount == 1)
+
+        let receiveTask = Task { try await transport.receive() }
+        await Task.yield()
+        await Task.yield()
+        adapter.completeReceive(.success(.text("direct")))
+
+        #expect(try await receiveTask.value == .text("direct"))
+        #expect(adapter.snapshot.receiveCount == 2)
+    }
+
+    @Test("Synchronous receive bursts use constant stack depth")
+    func synchronousReceiveBurst() async throws {
+        let expected = (0..<2_048).map { index in
+            WebSocketMessage.binary(Data([UInt8(index & 0xff)]))
+        }
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil),
+            receiveResults: expected.map { .success($0) }
+        )
+        let transport = URLSessionWebSocketTransport(
+            adapter: adapter,
+            inboundBufferingPolicy: .init(
+                maximumMessages: expected.count,
+                maximumBytes: expected.count
+            )
+        )
+
+        _ = try await transport.open()
+        #expect(adapter.snapshot.receiveCount == expected.count + 1)
+
+        var received: [WebSocketMessage] = []
+        received.reserveCapacity(expected.count)
+        for _ in expected {
+            received.append(try await transport.receive())
+        }
+        #expect(received == expected)
+    }
+
+    @Test("Count overflow preserves the accepted prefix and fails closed")
+    func inboundMessageCountOverflow() async throws {
+        let accepted: [WebSocketMessage] = [
+            .text("one"),
+            .binary(Data([0x02, 0x03])),
+        ]
+        let rejected = WebSocketMessage.text("three")
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil),
+            receiveResults: (accepted + [rejected]).map { .success($0) }
+        )
+        let policy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 2,
+            maximumBytes: 1_024
+        )
+        let transport = URLSessionWebSocketTransport(
+            adapter: adapter,
+            inboundBufferingPolicy: policy
+        )
+
+        _ = try await transport.open()
+        guard case .closed(nil) = transport.status() else {
+            Issue.record("Expected overflow to close the transport")
+            return
+        }
+        #expect(adapter.snapshot.receiveCount == 3)
+        #expect(adapter.snapshot.cancelCount == 1)
+        #expect(try await transport.receive() == accepted[0])
+        #expect(try await transport.receive() == accepted[1])
+
+        let error = await requireWebSocketError {
+            try await transport.receive()
+        }
+        guard case .inboundBufferOverflow(let overflow)? = error else {
+            Issue.record(
+                "Expected inboundBufferOverflow, got \(String(describing: error))"
+            )
+            return
+        }
+        #expect(overflow.policy == policy)
+        #expect(overflow.bufferedMessageCount == 2)
+        #expect(overflow.bufferedByteCount == 5)
+        #expect(overflow.incomingMessageByteCount == 5)
+
+        let lateClose = WebSocketClose(
+            code: .policyViolation,
+            reason: Data("slow consumer".utf8)
+        )
+        adapter.emit(.closed(lateClose))
+        guard case .closed(let reportedClose) = transport.status() else {
+            Issue.record("Expected late close details to refine status")
+            return
+        }
+        #expect(reportedClose == lateClose)
+
+        let repeatedError = await requireWebSocketError {
+            try await transport.receive()
+        }
+        guard case .inboundBufferOverflow(let repeatedOverflow)? =
+            repeatedError else {
+            Issue.record("Expected overflow to remain the terminal result")
+            return
+        }
+        #expect(repeatedOverflow == overflow)
+        #expect(adapter.snapshot.cancelCount == 1)
+    }
+
+    @Test("Byte overflow counts UTF-8 and binary payloads exactly")
+    func inboundByteOverflow() async throws {
+        let accepted: [WebSocketMessage] = [
+            .text("é"),
+            .binary(Data([0x01, 0x02, 0x03])),
+        ]
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil),
+            receiveResults: (accepted + [.text("!")]).map { .success($0) }
+        )
+        let policy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 4,
+            maximumBytes: 5
+        )
+        let transport = URLSessionWebSocketTransport(
+            adapter: adapter,
+            inboundBufferingPolicy: policy
+        )
+
+        _ = try await transport.open()
+        #expect(try await transport.receive() == accepted[0])
+        #expect(try await transport.receive() == accepted[1])
+
+        let error = await requireWebSocketError {
+            try await transport.receive()
+        }
+        guard case .inboundBufferOverflow(let overflow)? = error else {
+            Issue.record(
+                "Expected inboundBufferOverflow, got \(String(describing: error))"
+            )
+            return
+        }
+        #expect(overflow.bufferedMessageCount == 2)
+        #expect(overflow.bufferedByteCount == 5)
+        #expect(overflow.incomingMessageByteCount == 1)
+        #expect(adapter.snapshot.cancelCount == 1)
+    }
+
+    @Test("Buffered messages drain before peer closure is surfaced")
+    func bufferedMessagesDrainBeforePeerClose() async throws {
+        let messages: [WebSocketMessage] = [
+            .text("before-close"),
+            .binary(Data([0xca, 0xfe])),
+        ]
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil),
+            receiveResults: messages.map { .success($0) }
+        )
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+        _ = try await transport.open()
+        let connection = WebSocketConnection(
+            url: try #require(URL(string: "wss://example.com/socket")),
+            negotiatedSubprotocol: nil,
+            transport: transport
+        )
+        let close = WebSocketClose(
+            code: .goingAway,
+            reason: Data("maintenance".utf8)
+        )
+
+        adapter.emit(.closed(close))
+
+        #expect(await connection.state == .closed(close))
+        var iterator = connection.messages.makeAsyncIterator()
+        #expect(try await iterator.next() == messages[0])
+        #expect(try await iterator.next() == messages[1])
+        #expect(try await iterator.next() == nil)
+        #expect(adapter.snapshot.cancelCount == 0)
+
+        adapter.completeReceive(.success(.text("late")))
+        #expect(adapter.snapshot.receiveCount == messages.count + 1)
+    }
+
+    @Test("Receive failures wait for peer close details without hard cancel")
+    func receiveFailureWaitsForCloseDetails() async throws {
+        for locallyInitiated in [false, true] {
+            let adapter = FakeWebSocketTaskAdapter(
+                eventOnResume: .opened(negotiatedSubprotocol: nil)
+            )
+            let transport = URLSessionWebSocketTransport(adapter: adapter)
+            _ = try await transport.open()
+            let receiveTask = Task { try await transport.receive() }
+            await Task.yield()
+
+            if locallyInitiated {
+                transport.close(
+                    code: .normalClosure,
+                    reason: Data("done".utf8)
+                )
+            }
+            adapter.completeReceive(.failure(URLError(.cancelled)))
+
+            #expect(adapter.snapshot.cancelCount == 0)
+            #expect(adapter.snapshot.closes.count == (locallyInitiated ? 1 : 0))
+
+            let close = WebSocketClose(
+                code: locallyInitiated ? .normalClosure : .goingAway,
+                reason: Data("peer close".utf8)
+            )
+            adapter.setCloseDetails(close)
+            adapter.emit(.closed(close))
+
+            let error = await requireWebSocketError {
+                try await receiveTask.value
+            }
+            guard case .connectionClosed(let reportedClose)? = error else {
+                Issue.record("Expected refined connectionClosed error")
+                continue
+            }
+            #expect(reportedClose == close)
+            #expect(adapter.snapshot.cancelCount == 0)
+        }
     }
 
     @Test("Operation failures close the transport")
@@ -1138,6 +1493,7 @@ private struct WebSocketFixtureRequest: WebSocketRequest {
     let headers: [String: String]?
     let subprotocols: [String]
     let maximumMessageSize: Int?
+    let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
     let customization: WebSocketRequestCustomization
 
     init(
@@ -1147,6 +1503,7 @@ private struct WebSocketFixtureRequest: WebSocketRequest {
         headers: [String: String]? = nil,
         subprotocols: [String] = [],
         maximumMessageSize: Int? = nil,
+        inboundBufferingPolicy: WebSocketInboundBufferingPolicy = .default,
         customization: WebSocketRequestCustomization = .none
     ) {
         self.path = path
@@ -1155,6 +1512,7 @@ private struct WebSocketFixtureRequest: WebSocketRequest {
         self.headers = headers
         self.subprotocols = subprotocols
         self.maximumMessageSize = maximumMessageSize
+        self.inboundBufferingPolicy = inboundBufferingPolicy
         self.customization = customization
     }
 
@@ -1184,6 +1542,63 @@ private struct WebSocketFixtureRequest: WebSocketRequest {
     }
 }
 
+private final class AlternatingWebSocketTransportOptionsRequest:
+    WebSocketRequest,
+    @unchecked Sendable {
+    struct ReadCounts: Sendable {
+        let maximumMessageSize: Int
+        let inboundBufferingPolicy: Int
+    }
+
+    private struct State {
+        var maximumMessageSizeReads = 0
+        var inboundBufferingPolicyReads = 0
+    }
+
+    let path = "socket"
+    private let firstMaximumMessageSize: Int
+    private let firstBufferingPolicy: WebSocketInboundBufferingPolicy
+    private let state = LockedBox(State())
+
+    init(
+        firstMaximumMessageSize: Int,
+        firstBufferingPolicy: WebSocketInboundBufferingPolicy
+    ) {
+        self.firstMaximumMessageSize = firstMaximumMessageSize
+        self.firstBufferingPolicy = firstBufferingPolicy
+    }
+
+    var maximumMessageSize: Int? {
+        state.withLock { state in
+            state.maximumMessageSizeReads += 1
+            return state.maximumMessageSizeReads == 1
+                ? firstMaximumMessageSize
+                : 0
+        }
+    }
+
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        state.withLock { state in
+            state.inboundBufferingPolicyReads += 1
+            return state.inboundBufferingPolicyReads == 1
+                ? firstBufferingPolicy
+                : WebSocketInboundBufferingPolicy(
+                    maximumMessages: 0,
+                    maximumBytes: 0
+                )
+        }
+    }
+
+    var readCounts: ReadCounts {
+        state.withLock { state in
+            ReadCounts(
+                maximumMessageSize: state.maximumMessageSizeReads,
+                inboundBufferingPolicy: state.inboundBufferingPolicyReads
+            )
+        }
+    }
+}
+
 private enum WebSocketRequestCustomization: Sendable {
     case none
     case valid
@@ -1202,7 +1617,7 @@ private enum WebSocketFixtureError: Error, Sendable {
 private struct CapturedWebSocketFactoryInput {
     let session: URLSession
     let request: URLRequest
-    let maximumMessageSize: Int?
+    let configuration: WebSocketTransportConfiguration
 }
 
 private func requireWebSocketError<Success>(
@@ -1264,7 +1679,8 @@ private final class FakeWebSocketTaskAdapter: WebSocketTaskAdapter,
         var eventHandler: EventHandler?
         var eventOnResume: WebSocketTaskEvent?
         var sendResult: Result<Void, any Error>?
-        var receiveResult: Result<WebSocketMessage, any Error>?
+        var receiveResults: [Result<WebSocketMessage, any Error>]
+        var nextReceiveResultIndex = 0
         var pingResult: Result<Void, any Error>?
         var sendCompletion: VoidCompletion?
         var receiveCompletion: ReceiveCompletion?
@@ -1290,14 +1706,19 @@ private final class FakeWebSocketTaskAdapter: WebSocketTaskAdapter,
         eventOnResume: WebSocketTaskEvent? = nil,
         sendResult: Result<Void, any Error>? = nil,
         receiveResult: Result<WebSocketMessage, any Error>? = nil,
+        receiveResults: [Result<WebSocketMessage, any Error>] = [],
         pingResult: Result<Void, any Error>? = nil,
         handshakeResponse: HTTPURLResponse? = nil,
         cancelCurrentTaskAfterSendCompletion: Bool = false
     ) {
+        var configuredReceiveResults = receiveResults
+        if let receiveResult {
+            configuredReceiveResults.insert(receiveResult, at: 0)
+        }
         state = LockedBox(State(
             eventOnResume: eventOnResume,
             sendResult: sendResult,
-            receiveResult: receiveResult,
+            receiveResults: configuredReceiveResults,
             pingResult: pingResult,
             handshakeResponse: handshakeResponse,
             cancelCurrentTaskAfterSendCompletion:
@@ -1358,12 +1779,17 @@ private final class FakeWebSocketTaskAdapter: WebSocketTaskAdapter,
     }
 
     func receive(completion: @escaping ReceiveCompletion) {
-        let result = state.withLock { state in
+        let result = state.withLock {
+            state -> Result<WebSocketMessage, any Error>? in
             state.receiveCount += 1
-            if state.receiveResult == nil {
+            if state.nextReceiveResultIndex < state.receiveResults.count {
+                let result = state.receiveResults[state.nextReceiveResultIndex]
+                state.nextReceiveResultIndex += 1
+                return result
+            } else {
                 state.receiveCompletion = completion
+                return nil
             }
-            return state.receiveResult
         }
         Task { await receiveStarted.signal() }
         if let result {

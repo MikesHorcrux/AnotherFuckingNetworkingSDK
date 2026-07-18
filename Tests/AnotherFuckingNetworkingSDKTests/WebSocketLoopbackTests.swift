@@ -111,8 +111,8 @@ struct WebSocketLoopbackTests {
         delegateSnapshot.expectOneTaskAcrossEveryCallback()
     }
 
-    @Test("A peer close wins the receive race without losing close details")
-    func peerCloseDuringReceive() async throws {
+    @Test("An idle peer close updates lifecycle without public receive demand")
+    func idlePeerClose() async throws {
         let server = try await LoopbackWebSocketServer.start(
             behavior: .accept()
         )
@@ -141,15 +141,6 @@ struct WebSocketLoopbackTests {
         defer { lifecycleTask.cancel() }
         await lifecycleStarted.wait()
 
-        let receiveTask = Task {
-            try await connection.receive()
-        }
-        defer { receiveTask.cancel() }
-        await Task.yield()
-        try await connection.send(text: "receive-ready")
-        await server.waitForMessage()
-        #expect(server.snapshot.receivedMessages == [.text("receive-ready")])
-
         let close = WebSocketClose(
             code: .goingAway,
             reason: Data("Server maintenance".utf8)
@@ -158,23 +149,6 @@ struct WebSocketLoopbackTests {
             code: close.code,
             reason: "Server maintenance"
         )
-
-        do {
-            _ = try await withLoopbackTimeout {
-                try await withTaskCancellationHandler {
-                    try await receiveTask.value
-                } onCancel: {
-                    receiveTask.cancel()
-                }
-            }
-            Issue.record("Expected the pending receive to observe peer closure")
-        } catch let error as WebSocketError {
-            guard case .connectionClosed(let receivedClose) = error else {
-                Issue.record("Expected connectionClosed, got \(error)")
-                return
-            }
-            #expect(receivedClose == close)
-        }
 
         let lifecycle = try await withLoopbackTimeout {
             await withTaskCancellationHandler {
@@ -189,6 +163,7 @@ struct WebSocketLoopbackTests {
 
         await server.waitForCompletion()
         await delegate.completionSignal.wait()
+        #expect(server.snapshot.receivedMessages.isEmpty)
         #expect(server.snapshot.receivedClose == close)
         #expect(server.snapshot.failureDescription == nil)
 

@@ -307,6 +307,9 @@ struct ChatSocket: WebSocketRequest {
     }
     var subprotocols: [String] { ["chat.v1"] }
     var maximumMessageSize: Int? { 1_048_576 }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        .init(maximumMessages: 64, maximumBytes: 8 * 1_024 * 1_024)
+    }
 }
 
 let connection = try await client.connect(ChatSocket(roomID: "lobby"))
@@ -329,7 +332,25 @@ try await connection.ping()
 try await connection.close(code: .normalClosure, reason: "Done")
 ```
 
-Use either `receive()` or the demand-driven `messages` sequence; only one receive may be active on a connection at a time. A normal or going-away close frame ends the sequence, while abnormal closure is thrown. `close` starts the closing handshake and returns without waiting for the peer to finish it. Services can depend on `any WebSocketClientProtocol`, and can retain the returned `any WebSocketConnectionProtocol` without depending on `APIClient` directly.
+Use either `receive()` or `messages`; only one public receive may be active on a
+connection at a time. After the handshake, the SDK continuously keeps one
+Foundation receive armed so peer closure is observable even while the
+application is idle. Complete messages are retained FIFO until a consumer asks
+for them. Messages accepted before closure remain drainable; a normal or
+going-away close then ends `messages`, while abnormal closure is thrown. `close`
+starts the closing handshake and returns without waiting for the peer to finish
+it. Services can depend on `any WebSocketClientProtocol`, and can retain the
+returned `any WebSocketConnectionProtocol` without depending on `APIClient`
+directly.
+
+`inboundBufferingPolicy` bounds that retained FIFO. Its default is 64 messages
+and 8 MiB of aggregate text UTF-8 or binary payload bytes. Exceeding either
+limit rejects the incoming message, cancels the connection, preserves the
+already accepted prefix for draining, and then throws
+`WebSocketError.inboundBufferOverflow` with counts that do not retain the
+rejected payload. `maximumMessageSize` remains Foundation's per-message limit;
+the buffering policy is an aggregate retained-payload limit. Because one
+Foundation message may be in flight, it is not a strict peak-memory ceiling.
 
 `states` emits an immediate lifecycle snapshot, pushes later `.open`,
 `.closing`, and `.closed` transitions, and finishes after closure. Each
@@ -354,7 +375,12 @@ func makeSocketModel(
 
 Rejected upgrades throw `WebSocketError.handshakeFailed` with status and response-header metadata. URL, subprotocol, reserved-header, message-size, transport, and close failures remain distinct cases. `APIClient` installs a task-specific delegate to observe the upgrade and close lifecycle; authentication, redirects, cookies, metrics, and the intercepted lifecycle events still flow through the injected session's delegate. Do not install a competing task-specific delegate from `urlSession(_:didCreateTask:)` for these WebSocket tasks.
 
-Cancellation is connection-scoped. Cancelling an active `connect`, `send`, `receive`, or `ping` preserves `CancellationError` and cancels the underlying socket task, closing that connection for every task that shares it. Breaking a `messages` loop after a message has arrived simply stops requesting the next message; cancelling an in-flight iteration closes the connection.
+Cancellation is connection-scoped. Cancelling an active `connect`, `send`,
+`receive`, or `ping` preserves `CancellationError` and cancels the underlying
+socket task, closing that connection for every task that shares it. Breaking a
+`messages` loop stops consumer demand, but the SDK receive pump remains active;
+the bounded policy therefore still applies while that consumer is idle.
+Cancelling an in-flight iteration closes the connection.
 
 The SDK deliberately does not reconnect automatically or choose a heartbeat schedule. Reconnect backoff, session restoration, and ping intervals/timeouts are application policy; call `ping()` directly or build that policy around `WebSocketClientProtocol`.
 

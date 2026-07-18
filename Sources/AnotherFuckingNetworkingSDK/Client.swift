@@ -42,10 +42,15 @@ public extension APIClientTransferProtocol {
     }
 }
 
+struct WebSocketTransportConfiguration: Sendable {
+    let maximumMessageSize: Int?
+    let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+}
+
 typealias WebSocketTransportFactory = @Sendable (
     URLSession,
     URLRequest,
-    Int?
+    WebSocketTransportConfiguration
 ) -> any WebSocketTransport
 
 /// A URLSession-backed API client.
@@ -123,11 +128,13 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             decoderFactory: decoderFactory,
             logger: logger,
             activityMonitor: activityMonitor,
-            webSocketTransportFactory: { session, request, maximumMessageSize in
+            webSocketTransportFactory: { session, request, configuration in
                 URLSessionWebSocketTransport(
                     session: session,
                     request: request,
-                    maximumMessageSize: maximumMessageSize
+                    maximumMessageSize: configuration.maximumMessageSize,
+                    inboundBufferingPolicy:
+                        configuration.inboundBufferingPolicy
                 )
             }
         )
@@ -186,11 +193,12 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     ) async throws -> any WebSocketConnectionProtocol {
         try Task.checkCancellation()
         let configuration = state.withCriticalRegion { $0 }
-        let urlRequest = try WebSocketRequestBuilder.make(
+        let preparedRequest = try WebSocketRequestBuilder.prepare(
             request,
             baseURL: configuration.baseURL,
             globalHeaders: configuration.globalHeaders
         )
+        let urlRequest = preparedRequest.urlRequest
         try Task.checkCancellation()
         guard let url = urlRequest.url else {
             throw WebSocketError.invalidURL
@@ -200,7 +208,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         let transport = webSocketTransportFactory(
             urlSession,
             urlRequest,
-            request.maximumMessageSize
+            preparedRequest.transportConfiguration
         )
 
         do {

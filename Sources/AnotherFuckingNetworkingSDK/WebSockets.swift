@@ -2,6 +2,52 @@ import Foundation
 
 // MARK: - Public request and message types
 
+/// Bounds messages retained by an always-on WebSocket receive pump while the
+/// application is not actively receiving.
+public struct WebSocketInboundBufferingPolicy:
+    Equatable,
+    Hashable,
+    Sendable {
+    /// A balanced mobile default: at most 64 queued messages and 8 MiB of
+    /// retained text or binary payload bytes.
+    public static let `default` = Self(
+        maximumMessages: 64,
+        maximumBytes: 8 * 1_024 * 1_024
+    )
+
+    /// Maximum number of complete messages retained in the FIFO.
+    public let maximumMessages: Int
+    /// Aggregate UTF-8 text or binary payload bytes retained in the FIFO.
+    public let maximumBytes: Int
+
+    /// Creates limits that are validated when the request is connected.
+    /// Both values must be greater than zero.
+    public init(maximumMessages: Int, maximumBytes: Int) {
+        self.maximumMessages = maximumMessages
+        self.maximumBytes = maximumBytes
+    }
+}
+
+/// Details captured when a slow consumer exceeds its inbound buffering policy.
+public struct WebSocketInboundBufferOverflow: Equatable, Sendable {
+    public let policy: WebSocketInboundBufferingPolicy
+    public let bufferedMessageCount: Int
+    public let bufferedByteCount: Int
+    public let incomingMessageByteCount: Int
+
+    public init(
+        policy: WebSocketInboundBufferingPolicy,
+        bufferedMessageCount: Int,
+        bufferedByteCount: Int,
+        incomingMessageByteCount: Int
+    ) {
+        self.policy = policy
+        self.bufferedMessageCount = bufferedMessageCount
+        self.bufferedByteCount = bufferedByteCount
+        self.incomingMessageByteCount = incomingMessageByteCount
+    }
+}
+
 /// A type-safe description of a WebSocket handshake.
 public protocol WebSocketRequest: Sendable {
     /// The endpoint path relative to the client's base URL.
@@ -24,6 +70,11 @@ public protocol WebSocketRequest: Sendable {
     /// received message. `nil` preserves Foundation's default.
     var maximumMessageSize: Int? { get }
 
+    /// Aggregate limits for complete messages retained while no `receive()` is
+    /// waiting. The socket closes with a typed error instead of dropping data
+    /// when either limit would be exceeded.
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy { get }
+
     /// Builds the endpoint URL before its scheme is converted to `ws` or `wss`.
     func makeURL(baseURL: URL) -> URL?
 
@@ -37,6 +88,7 @@ public extension WebSocketRequest {
     var headers: [String: String]? { nil }
     var subprotocols: [String] { [] }
     var maximumMessageSize: Int? { nil }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy { .default }
 
     func makeURL(baseURL: URL) -> URL? {
         DefaultWebSocketURLTarget(
@@ -127,6 +179,7 @@ public enum WebSocketConnectionState: Equatable, Sendable {
 public enum WebSocketError: LocalizedError, Sendable {
     case invalidURL
     case invalidMaximumMessageSize(Int)
+    case invalidInboundBufferingPolicy(WebSocketInboundBufferingPolicy)
     case invalidSubprotocol(String)
     case duplicateSubprotocol(String)
     case reservedHeader(String)
@@ -144,6 +197,7 @@ public enum WebSocketError: LocalizedError, Sendable {
     case concurrentReceive
     case invalidCloseCode(Int)
     case closeReasonTooLong(maximumBytes: Int, actualBytes: Int)
+    case inboundBufferOverflow(WebSocketInboundBufferOverflow)
     case unsupportedMessage
     case transport(URLError)
     case unknown(any Error)
@@ -154,6 +208,8 @@ public enum WebSocketError: LocalizedError, Sendable {
             return "The WebSocket URL is invalid."
         case .invalidMaximumMessageSize(let value):
             return "The maximum WebSocket message size must be positive, not \(value)."
+        case .invalidInboundBufferingPolicy(let policy):
+            return "WebSocket inbound buffering limits must be positive, not \(policy.maximumMessages) messages and \(policy.maximumBytes) bytes."
         case .invalidSubprotocol(let value):
             return "The WebSocket subprotocol is invalid: \(value)."
         case .duplicateSubprotocol(let value):
@@ -185,6 +241,8 @@ public enum WebSocketError: LocalizedError, Sendable {
             return "The WebSocket close code cannot be sent: \(value)."
         case .closeReasonTooLong(let maximumBytes, let actualBytes):
             return "The WebSocket close reason is \(actualBytes) bytes; the maximum is \(maximumBytes)."
+        case .inboundBufferOverflow(let overflow):
+            return "The WebSocket inbound buffer exceeded its \(overflow.policy.maximumMessages)-message or \(overflow.policy.maximumBytes)-byte limit."
         case .unsupportedMessage:
             return "Foundation returned an unsupported WebSocket message type."
         case .transport(let error):
@@ -223,6 +281,8 @@ public protocol WebSocketConnectionProtocol: Sendable {
     func send(_ message: WebSocketMessage) async throws
 
     /// Receives one complete message. Only one receive may be active at once.
+    /// Messages already accepted by the bounded receive pump remain drainable
+    /// after lifecycle closure; the terminal result follows the retained FIFO.
     func receive() async throws -> WebSocketMessage
 
     /// Sends a ping and waits for Foundation's pong callback.
@@ -294,9 +354,9 @@ public struct WebSocketConnectionStates: AsyncSequence, Sendable {
     }
 }
 
-/// A demand-driven asynchronous sequence that performs one receive per call to
-/// its iterator's `next()` method. Normal and going-away close frames end the
-/// sequence; abnormal termination is thrown.
+/// An asynchronous sequence that drains one retained message per call to its
+/// iterator's `next()` method. Normal and going-away close frames end the
+/// sequence after the accepted FIFO; abnormal termination is then thrown.
 public struct WebSocketMessages: AsyncSequence, Sendable {
     public typealias Element = WebSocketMessage
 
@@ -331,6 +391,18 @@ public struct WebSocketMessages: AsyncSequence, Sendable {
 // MARK: - Request construction
 
 package enum WebSocketRequestBuilder {
+    struct PreparedRequest {
+        let urlRequest: URLRequest
+        let transportConfiguration: WebSocketTransportConfiguration
+    }
+
+    private struct RequestOptions {
+        let headers: [String: String]?
+        let subprotocols: [String]
+        let maximumMessageSize: Int?
+        let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+    }
+
     private static let reservedHeaders: Set<String> = [
         "connection",
         "host",
@@ -346,21 +418,49 @@ package enum WebSocketRequestBuilder {
         baseURL: URL?,
         globalHeaders: [String: String]
     ) throws -> URLRequest {
+        try prepare(
+            request,
+            baseURL: baseURL,
+            globalHeaders: globalHeaders
+        ).urlRequest
+    }
+
+    /// Snapshots transport-affecting request options once so validation and
+    /// transport construction cannot observe different values from a
+    /// synchronized mutable request conformer.
+    static func prepare<R: WebSocketRequest>(
+        _ request: R,
+        baseURL: URL?,
+        globalHeaders: [String: String]
+    ) throws -> PreparedRequest {
+        let options = RequestOptions(
+            headers: request.headers,
+            subprotocols: request.subprotocols,
+            maximumMessageSize: request.maximumMessageSize,
+            inboundBufferingPolicy: request.inboundBufferingPolicy
+        )
+
         guard let baseURL,
               let unresolvedURL = request.makeURL(baseURL: baseURL),
               let webSocketURL = webSocketURL(from: unresolvedURL) else {
             throw WebSocketError.invalidURL
         }
 
-        if let maximumMessageSize = request.maximumMessageSize,
+        if let maximumMessageSize = options.maximumMessageSize,
            maximumMessageSize <= 0 {
             throw WebSocketError.invalidMaximumMessageSize(maximumMessageSize)
         }
 
-        try validate(subprotocols: request.subprotocols)
+        let bufferingPolicy = options.inboundBufferingPolicy
+        guard bufferingPolicy.maximumMessages > 0,
+              bufferingPolicy.maximumBytes > 0 else {
+            throw WebSocketError.invalidInboundBufferingPolicy(bufferingPolicy)
+        }
+
+        try validate(subprotocols: options.subprotocols)
 
         var headers = normalizedHeaders(globalHeaders)
-        for (name, value) in normalizedHeaders(request.headers ?? [:]) {
+        for (name, value) in normalizedHeaders(options.headers ?? [:]) {
             headers[name] = value
         }
         try validateCallerHeaders(headers)
@@ -372,10 +472,10 @@ package enum WebSocketRequestBuilder {
         }
 
         let expectedSubprotocolHeader: String?
-        if request.subprotocols.isEmpty {
+        if options.subprotocols.isEmpty {
             expectedSubprotocolHeader = nil
         } else {
-            let header = request.subprotocols.joined(separator: ", ")
+            let header = options.subprotocols.joined(separator: ", ")
             urlRequest.setValue(header, forHTTPHeaderField: "Sec-WebSocket-Protocol")
             expectedSubprotocolHeader = header
         }
@@ -392,7 +492,13 @@ package enum WebSocketRequestBuilder {
             urlRequest,
             expectedSubprotocolHeader: expectedSubprotocolHeader
         )
-        return urlRequest
+        return PreparedRequest(
+            urlRequest: urlRequest,
+            transportConfiguration: WebSocketTransportConfiguration(
+                maximumMessageSize: options.maximumMessageSize,
+                inboundBufferingPolicy: bufferingPolicy
+            )
+        )
     }
 
     private static func webSocketURL(from url: URL) -> URL? {
@@ -735,17 +841,97 @@ extension WebSocketTransport {
     }
 }
 
+private extension WebSocketMessage {
+    var inboundBufferedByteCount: Int {
+        switch self {
+        case .text(let text):
+            return text.utf8.count
+        case .binary(let data):
+            return data.count
+        }
+    }
+}
+
 final class URLSessionWebSocketTransport: WebSocketTransport,
     @unchecked Sendable {
+    private struct BufferedMessage: Sendable {
+        let message: WebSocketMessage
+        let byteCount: Int
+    }
+
+    /// An amortized O(1) FIFO that avoids shifting retained payloads on every
+    /// receive. Storage is compacted only after a meaningful consumed prefix.
+    private struct MessageQueue: Sendable {
+        private var storage: [BufferedMessage?] = []
+        private var headIndex = 0
+
+        var count: Int { storage.count - headIndex }
+
+        mutating func append(_ element: BufferedMessage) {
+            storage.append(element)
+        }
+
+        mutating func popFirst(
+            releaseStorageWhenEmpty: Bool
+        ) -> BufferedMessage? {
+            guard headIndex < storage.count,
+                  let element = storage[headIndex] else {
+                return nil
+            }
+            storage[headIndex] = nil
+            headIndex += 1
+
+            if headIndex == storage.count {
+                storage.removeAll(keepingCapacity: !releaseStorageWhenEmpty)
+                headIndex = 0
+            } else if headIndex >= 64,
+                      headIndex >= storage.count / 2 {
+                storage.removeFirst(headIndex)
+                headIndex = 0
+            }
+            return element
+        }
+    }
+
     private struct LifecycleState: Sendable {
         var openStarted = false
         var didOpen = false
         var isCompleted = false
         var cancelRequested = false
+        var localCloseRequested = false
         var close: WebSocketClose?
+        var receivePumpStarted = false
+        var receiveDriverActive = false
+        var receiveOutstanding = false
+        var receiveWaiter: OneShotContinuation<WebSocketMessage>?
+        var bufferedMessages = MessageQueue()
+        var bufferedByteCount = 0
+        var pendingReceiveFailure: (any Error)?
+        var terminalReceiveError: (any Error)?
+    }
+
+    private struct TerminalAction {
+        let waiter: OneShotContinuation<WebSocketMessage>?
+        let error: any Error
+        let close: WebSocketClose?
+        let shouldCancel: Bool
+    }
+
+    private enum ReceiveSuccessAction {
+        case ignored
+        case accepted(
+            waiter: OneShotContinuation<WebSocketMessage>?,
+            shouldDrive: Bool
+        )
+        case overflow(
+            WebSocketInboundBufferOverflow,
+            close: WebSocketClose?,
+            shouldCancel: Bool
+        )
     }
 
     private let adapter: any WebSocketTaskAdapter
+    private let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
     private let lifecycle = CriticalState(LifecycleState())
     private let openContinuation = OneShotContinuation<String?>()
     private let stateBroadcaster = LatestValueBroadcaster<
@@ -755,17 +941,27 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     convenience init(
         session: URLSession,
         request: URLRequest,
-        maximumMessageSize: Int?
+        maximumMessageSize: Int?,
+        inboundBufferingPolicy: WebSocketInboundBufferingPolicy = .default
     ) {
-        self.init(adapter: FoundationWebSocketTaskAdapter(
-            session: session,
-            request: request,
-            maximumMessageSize: maximumMessageSize
-        ))
+        self.init(
+            adapter: FoundationWebSocketTaskAdapter(
+                session: session,
+                request: request,
+                maximumMessageSize: maximumMessageSize
+            ),
+            inboundBufferingPolicy: inboundBufferingPolicy
+        )
     }
 
-    init(adapter: any WebSocketTaskAdapter) {
+    init(
+        adapter: any WebSocketTaskAdapter,
+        inboundBufferingPolicy: WebSocketInboundBufferingPolicy = .default
+    ) {
+        precondition(inboundBufferingPolicy.maximumMessages > 0)
+        precondition(inboundBufferingPolicy.maximumBytes > 0)
         self.adapter = adapter
+        self.inboundBufferingPolicy = inboundBufferingPolicy
         adapter.setEventHandler { [weak self] event in
             self?.handle(event)
         }
@@ -806,8 +1002,44 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     func receive() async throws -> WebSocketMessage {
-        try await perform { completion in
-            self.adapter.receive(completion: completion)
+        let operation = OneShotContinuation<WebSocketMessage>()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard operation.install(continuation) else { return }
+                if Task.isCancelled {
+                    operation.resolve(.failure(CancellationError()))
+                    cancel()
+                    return
+                }
+
+                let immediateResult = lifecycle.withCriticalRegion {
+                    state -> Result<WebSocketMessage, any Error>? in
+                    if let buffered = state.bufferedMessages.popFirst(
+                        releaseStorageWhenEmpty: state.isCompleted
+                    ) {
+                        state.bufferedByteCount -= buffered.byteCount
+                        return .success(buffered.message)
+                    }
+                    if state.isCompleted {
+                        return .failure(
+                            state.terminalReceiveError
+                                ?? WebSocketError.connectionClosed(state.close)
+                        )
+                    }
+                    guard state.receiveWaiter == nil else {
+                        return .failure(WebSocketError.concurrentReceive)
+                    }
+                    state.receiveWaiter = operation
+                    return nil
+                }
+                if let immediateResult {
+                    operation.resolve(immediateResult)
+                }
+            }
+        } onCancel: {
+            operation.resolve(.failure(CancellationError()))
+            self.cancel()
         }
     }
 
@@ -818,27 +1050,57 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     func close(code: WebSocketCloseCode, reason: Data?) {
+        let shouldClose = lifecycle.withCriticalRegion { state in
+            guard !state.isCompleted, !state.localCloseRequested else {
+                return false
+            }
+            state.localCloseRequested = true
+            return true
+        }
+        guard shouldClose else { return }
         stateBroadcaster.publish(.closing)
         adapter.close(code: code, reason: reason)
     }
 
     func status() -> WebSocketTransportStatus {
         let taskClose = adapter.closeDetails()
-        let status = lifecycle.withCriticalRegion {
-            state -> WebSocketTransportStatus in
+        let observation = lifecycle.withCriticalRegion { state -> (
+            status: WebSocketTransportStatus,
+            waiter: OneShotContinuation<WebSocketMessage>?,
+            error: (any Error)?
+        ) in
             if let taskClose {
                 state.close = taskClose
                 state.isCompleted = true
+                state.receivePumpStarted = false
+                state.receiveDriverActive = false
+                state.receiveOutstanding = false
+                state.pendingReceiveFailure = nil
+                state.terminalReceiveError = Self.terminalError(
+                    preserving: state.terminalReceiveError,
+                    close: taskClose
+                )
+                let waiter = state.receiveWaiter
+                state.receiveWaiter = nil
+                return (
+                    .closed(taskClose),
+                    waiter,
+                    state.terminalReceiveError
+                )
             }
             if state.isCompleted || state.close != nil {
-                return .closed(state.close)
+                return (.closed(state.close), nil, nil)
             }
-            return .open
+            return (.open, nil, nil)
         }
         if let taskClose {
             stateBroadcaster.finish(with: .closed(taskClose))
         }
-        return status
+        if let waiter = observation.waiter,
+           let error = observation.error {
+            waiter.resolve(.failure(error))
+        }
+        return observation.status
     }
 
     func stateStream() -> AsyncStream<WebSocketConnectionState> {
@@ -852,16 +1114,38 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
                 state.close = taskClose
             }
             guard !state.isCompleted, !state.cancelRequested else {
-                return (shouldCancel: false, close: state.close)
+                return TerminalAction(
+                    waiter: nil,
+                    error: WebSocketError.connectionClosed(state.close),
+                    close: state.close,
+                    shouldCancel: false
+                )
             }
             state.cancelRequested = true
             state.isCompleted = true
-            return (shouldCancel: true, close: state.close)
+            state.receivePumpStarted = false
+            state.receiveDriverActive = false
+            state.receiveOutstanding = false
+            state.pendingReceiveFailure = nil
+            if state.terminalReceiveError == nil {
+                state.terminalReceiveError =
+                    WebSocketError.connectionClosed(state.close)
+            }
+            let waiter = state.receiveWaiter
+            state.receiveWaiter = nil
+            return TerminalAction(
+                waiter: waiter,
+                error: state.terminalReceiveError
+                    ?? WebSocketError.connectionClosed(state.close),
+                close: state.close,
+                shouldCancel: true
+            )
         }
         if cancellation.shouldCancel {
             adapter.cancel()
             stateBroadcaster.finish(with: .closed(cancellation.close))
         }
+        cancellation.waiter?.resolve(.failure(cancellation.error))
         openContinuation.resolve(.failure(CancellationError()))
     }
 
@@ -876,84 +1160,344 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
             try await withCheckedThrowingContinuation { checkedContinuation in
                 guard continuation.install(checkedContinuation) else { return }
                 if Task.isCancelled {
-                    cancel()
                     continuation.resolve(.failure(CancellationError()))
+                    cancel()
                 } else {
                     start { result in
-                        if case .failure = result {
-                            self.markCompleted()
+                        if case .failure(let error) = result {
+                            self.markCompleted(error: error)
                         }
                         continuation.resolve(result)
                     }
                 }
             }
         } onCancel: {
-            self.cancel()
             continuation.resolve(.failure(CancellationError()))
+            self.cancel()
         }
     }
 
     private func handle(_ event: WebSocketTaskEvent) {
         switch event {
         case .opened(let negotiatedSubprotocol):
-            lifecycle.withCriticalRegion { $0.didOpen = true }
+            let opening = lifecycle.withCriticalRegion { state -> (
+                accepted: Bool,
+                shouldDrive: Bool
+            ) in
+                guard !state.isCompleted, !state.didOpen else {
+                    return (false, false)
+                }
+                state.didOpen = true
+                openContinuation.resolve(.success(negotiatedSubprotocol))
+                state.receivePumpStarted = true
+                guard !state.receiveDriverActive else {
+                    return (true, false)
+                }
+                state.receiveDriverActive = true
+                return (true, true)
+            }
+            guard opening.accepted else { return }
             stateBroadcaster.publish(.open)
-            openContinuation.resolve(.success(negotiatedSubprotocol))
+            if opening.shouldDrive {
+                driveReceivePump()
+            }
 
         case .closed(let close):
-            lifecycle.withCriticalRegion { state in
+            let closure = lifecycle.withCriticalRegion { state in
                 state.close = close
                 state.isCompleted = true
+                state.receivePumpStarted = false
+                state.receiveDriverActive = false
+                state.receiveOutstanding = false
+                state.pendingReceiveFailure = nil
+                state.terminalReceiveError = Self.terminalError(
+                    preserving: state.terminalReceiveError,
+                    close: close
+                )
+                if !state.didOpen {
+                    openContinuation.resolve(.failure(
+                        WebSocketError.connectionClosed(close)
+                    ))
+                }
+                let waiter = state.receiveWaiter
+                state.receiveWaiter = nil
+                return TerminalAction(
+                    waiter: waiter,
+                    error: state.terminalReceiveError
+                        ?? WebSocketError.connectionClosed(close),
+                    close: close,
+                    shouldCancel: false
+                )
             }
             stateBroadcaster.finish(with: .closed(close))
-            openContinuation.resolve(.failure(
-                WebSocketError.connectionClosed(close)
-            ))
+            closure.waiter?.resolve(.failure(closure.error))
 
         case .completed(let error):
+            let taskClose = adapter.closeDetails()
+            let handshakeResponse = adapter.handshakeResponse()
             let completion = lifecycle.withCriticalRegion { state in
+                if let taskClose {
+                    state.close = taskClose
+                }
                 state.isCompleted = true
-                return (didOpen: state.didOpen, close: state.close)
+                state.receivePumpStarted = false
+                state.receiveDriverActive = false
+                state.receiveOutstanding = false
+                if state.terminalReceiveError == nil {
+                    state.terminalReceiveError = state.close.map {
+                        WebSocketError.connectionClosed($0)
+                    } ?? error ?? state.pendingReceiveFailure
+                        ?? WebSocketError.connectionClosed(nil)
+                }
+                state.pendingReceiveFailure = nil
+                if !state.didOpen {
+                    let openingError: any Error
+                    if let handshakeResponse {
+                        openingError = WebSocketError.handshakeFailed(
+                            metadata: HTTPResponseMetadata(handshakeResponse),
+                            underlying: error
+                        )
+                    } else if let error {
+                        openingError = error
+                    } else {
+                        openingError = WebSocketError.connectionClosed(
+                            state.close
+                        )
+                    }
+                    openContinuation.resolve(.failure(openingError))
+                }
+                let waiter = state.receiveWaiter
+                state.receiveWaiter = nil
+                return (
+                    close: state.close,
+                    waiter: waiter,
+                    receiveError: state.terminalReceiveError
+                        ?? WebSocketError.connectionClosed(state.close)
+                )
             }
             stateBroadcaster.finish(with: .closed(completion.close))
-            if completion.didOpen {
-                return
-            }
-            if let response = adapter.handshakeResponse() {
-                openContinuation.resolve(.failure(
-                    WebSocketError.handshakeFailed(
-                        metadata: HTTPResponseMetadata(response),
-                        underlying: error
-                    )
-                ))
-            } else if let error {
-                openContinuation.resolve(.failure(error))
-            } else {
-                let close = lifecycle.withCriticalRegion { $0.close }
-                openContinuation.resolve(.failure(
-                    WebSocketError.connectionClosed(close)
-                ))
-            }
+            completion.waiter?.resolve(.failure(completion.receiveError))
         }
     }
 
-    private func markCompleted() {
+    private func driveReceivePump() {
+        while true {
+            let shouldReceive = lifecycle.withCriticalRegion { state -> Bool in
+                guard state.receiveDriverActive,
+                      state.receivePumpStarted,
+                      !state.isCompleted,
+                      !state.receiveOutstanding else {
+                    state.receiveDriverActive = false
+                    return false
+                }
+                state.receiveOutstanding = true
+                return true
+            }
+            guard shouldReceive else { return }
+
+            adapter.receive { [weak self] result in
+                self?.handleReceiveResult(result)
+            }
+
+            let completedSynchronously = lifecycle.withCriticalRegion {
+                state -> Bool in
+                guard state.receivePumpStarted, !state.isCompleted else {
+                    state.receiveDriverActive = false
+                    return false
+                }
+                if state.receiveOutstanding {
+                    state.receiveDriverActive = false
+                    return false
+                }
+                return true
+            }
+            guard completedSynchronously else { return }
+        }
+    }
+
+    private func handleReceiveResult(
+        _ result: Result<WebSocketMessage, any Error>
+    ) {
+        switch result {
+        case .success(let message):
+            handleReceivedMessage(message)
+        case .failure(let error):
+            handleReceiveFailure(error)
+        }
+    }
+
+    private func handleReceivedMessage(_ message: WebSocketMessage) {
+        let byteCount = message.inboundBufferedByteCount
+        let action = lifecycle.withCriticalRegion {
+            state -> ReceiveSuccessAction in
+            guard state.receiveOutstanding else { return .ignored }
+            state.receiveOutstanding = false
+            guard !state.isCompleted else { return .ignored }
+
+            if let waiter = state.receiveWaiter {
+                state.receiveWaiter = nil
+                let shouldDrive = claimReceiveDriverIfNeeded(&state)
+                return .accepted(waiter: waiter, shouldDrive: shouldDrive)
+            }
+
+            let exceedsMessages = state.bufferedMessages.count
+                >= inboundBufferingPolicy.maximumMessages
+            let exceedsBytes = byteCount
+                > inboundBufferingPolicy.maximumBytes
+                || state.bufferedByteCount
+                    > inboundBufferingPolicy.maximumBytes - byteCount
+            if exceedsMessages || exceedsBytes {
+                let overflow = WebSocketInboundBufferOverflow(
+                    policy: inboundBufferingPolicy,
+                    bufferedMessageCount: state.bufferedMessages.count,
+                    bufferedByteCount: state.bufferedByteCount,
+                    incomingMessageByteCount: byteCount
+                )
+                state.isCompleted = true
+                state.receivePumpStarted = false
+                state.terminalReceiveError =
+                    WebSocketError.inboundBufferOverflow(overflow)
+                let shouldCancel = !state.cancelRequested
+                state.cancelRequested = true
+                return .overflow(
+                    overflow,
+                    close: state.close,
+                    shouldCancel: shouldCancel
+                )
+            }
+
+            state.bufferedMessages.append(BufferedMessage(
+                message: message,
+                byteCount: byteCount
+            ))
+            state.bufferedByteCount += byteCount
+            let shouldDrive = claimReceiveDriverIfNeeded(&state)
+            return .accepted(waiter: nil, shouldDrive: shouldDrive)
+        }
+
+        switch action {
+        case .ignored:
+            return
+        case .accepted(let waiter, let shouldDrive):
+            waiter?.resolve(.success(message))
+            if shouldDrive {
+                driveReceivePump()
+            }
+        case .overflow(_, let close, let shouldCancel):
+            if shouldCancel {
+                adapter.cancel()
+            }
+            stateBroadcaster.finish(with: .closed(close))
+        }
+    }
+
+    private func handleReceiveFailure(_ error: any Error) {
+        let taskClose = adapter.closeDetails()
+        let completion = lifecycle.withCriticalRegion {
+            state -> TerminalAction? in
+            guard state.receiveOutstanding else { return nil }
+            state.receiveOutstanding = false
+            guard !state.isCompleted else { return nil }
+            state.receivePumpStarted = false
+            state.receiveDriverActive = false
+            guard let taskClose else {
+                // URLSession reports task completion or a close delegate event
+                // after a receive callback fails. Preserve the callback error
+                // provisionally so a close frame arriving next can refine it.
+                state.pendingReceiveFailure = error
+                return nil
+            }
+            state.isCompleted = true
+            state.close = taskClose
+            state.pendingReceiveFailure = nil
+            let receiveError = WebSocketError.connectionClosed(taskClose)
+            state.terminalReceiveError = Self.terminalError(
+                preserving: state.terminalReceiveError,
+                close: taskClose
+            )
+            let waiter = state.receiveWaiter
+            state.receiveWaiter = nil
+            return TerminalAction(
+                waiter: waiter,
+                error: state.terminalReceiveError ?? receiveError,
+                close: state.close,
+                shouldCancel: false
+            )
+        }
+        guard let completion else { return }
+        if completion.shouldCancel {
+            adapter.cancel()
+        }
+        stateBroadcaster.finish(with: .closed(completion.close))
+        completion.waiter?.resolve(.failure(completion.error))
+    }
+
+    private func markCompleted(error: any Error) {
         let taskClose = adapter.closeDetails()
         let completion = lifecycle.withCriticalRegion { state in
-            state.isCompleted = true
             if let taskClose {
                 state.close = taskClose
             }
-            guard taskClose == nil, !state.cancelRequested else {
-                return (shouldCancel: false, close: state.close)
+            guard !state.isCompleted else {
+                return TerminalAction(
+                    waiter: nil,
+                    error: error,
+                    close: state.close,
+                    shouldCancel: false
+                )
             }
-            state.cancelRequested = true
-            return (shouldCancel: true, close: state.close)
+            state.isCompleted = true
+            state.receivePumpStarted = false
+            state.receiveDriverActive = false
+            state.receiveOutstanding = false
+            state.pendingReceiveFailure = nil
+            let receiveError: any Error = taskClose.map {
+                WebSocketError.connectionClosed($0)
+            } ?? error
+            if state.terminalReceiveError == nil {
+                state.terminalReceiveError = receiveError
+            }
+            let waiter = state.receiveWaiter
+            state.receiveWaiter = nil
+            let shouldCancel = taskClose == nil && !state.cancelRequested
+            if shouldCancel {
+                state.cancelRequested = true
+            }
+            return TerminalAction(
+                waiter: waiter,
+                error: state.terminalReceiveError ?? receiveError,
+                close: state.close,
+                shouldCancel: shouldCancel
+            )
         }
         if completion.shouldCancel {
             adapter.cancel()
         }
         stateBroadcaster.finish(with: .closed(completion.close))
+        completion.waiter?.resolve(.failure(completion.error))
+    }
+
+    private static func terminalError(
+        preserving existing: (any Error)?,
+        close: WebSocketClose?
+    ) -> any Error {
+        if let webSocketError = existing as? WebSocketError,
+           case .inboundBufferOverflow = webSocketError {
+            return webSocketError
+        }
+        return WebSocketError.connectionClosed(close)
+    }
+
+    private func claimReceiveDriverIfNeeded(
+        _ state: inout LifecycleState
+    ) -> Bool {
+        guard state.receivePumpStarted,
+              !state.isCompleted,
+              !state.receiveDriverActive else {
+            return false
+        }
+        state.receiveDriverActive = true
+        return true
     }
 }
 
@@ -1001,7 +1545,9 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
     }
 
     public func receive() async throws -> WebSocketMessage {
-        try await requireOpen()
+        if case .closing = resolvedState() {
+            throw WebSocketError.connectionClosing
+        }
         guard !receiveInProgress else {
             throw WebSocketError.concurrentReceive
         }
