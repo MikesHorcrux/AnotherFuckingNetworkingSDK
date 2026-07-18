@@ -92,6 +92,23 @@ public struct HTTPStatusPolicy: Equatable, Sendable {
         self.storage = storage
     }
 
+    /// Returns a policy that also accepts one additional status code.
+    ///
+    /// This is intentionally internal: decorators such as conditional
+    /// caching may admit `304 Not Modified` while preserving the request's
+    /// original status policy for every other response.
+    func including(_ statusCode: Int) -> Self {
+        guard !accepts(statusCode) else { return self }
+        switch storage {
+        case .all:
+            return self
+        case .successful:
+            return Self(ranges: [200...299, statusCode...statusCode])
+        case .ranges(let ranges):
+            return Self(ranges: ranges + [statusCode...statusCode])
+        }
+    }
+
     private static func normalizedStorage(
         for acceptedRanges: [ClosedRange<Int>]
     ) -> Storage {

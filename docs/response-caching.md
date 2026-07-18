@@ -11,7 +11,12 @@ flowchart TD
     Key -- no --> Network["Base API client"]
     Key -- yes --> Hit{"Fresh cache entry?"}
     Hit -- yes --> Return["Return typed response"]
-    Hit -- no --> Network
+    Hit -- no --> Revalidate{"Stale validator?"}
+    Revalidate -- no --> Network["Base API client"]
+    Revalidate -- yes --> Conditional["If-None-Match / If-Modified-Since"]
+    Conditional --> NotModified{"304?"}
+    NotModified -- yes --> Refresh["Refresh TTL and return cached value"]
+    NotModified -- no --> Store
     Network --> Store["Store successful response"]
     Store --> Evict["TTL / LRU / byte bound"]
     Evict --> Return
@@ -37,6 +42,25 @@ authorization scope, locale, feature flags, and body semantics. Return `nil`
 for requests that must always hit the network. Only successful responses are
 stored; failures and cancellation are never cached.
 
+For HTTP-aware revalidation, use `ConditionalCachedAPIClient` with the same
+bounded policy and key provider:
+
+```swift
+let client = ConditionalCachedAPIClient(
+    client: apiClient,
+    policy: ResponseCachePolicy(timeToLive: 60),
+    keyProvider: { request in
+        (request as? ProfileRequest).map { "profile:\($0.id)" }
+    }
+)
+```
+
+The decorator stores an `ETag` first, falling back to `Last-Modified`, and
+caps retained validator values at 1 KiB. Once an entry is stale, it sends the
+corresponding conditional request. A `304 Not Modified` returns the previously
+decoded response and refreshes its TTL. Pagination methods are forwarded; use
+`sendResponse(_:)` when applying the decorator to a paginated request.
+
 Writes do not invalidate reads automatically. After a successful mutation,
 invalidate the affected key or clear the decorator:
 
@@ -55,7 +79,5 @@ let coalesced = RequestCoalescingAPIClient(client: cached) { request in
 }
 ```
 
-This module intentionally does not synthesize conditional `If-None-Match`
-requests or treat `304 Not Modified` as a universal success. Applications that
-need validators can add them in `HTTPRequest.customize(_:)` and define their
-own status policy while retaining the explicit cache bounds.
+The cache remains opt-in and caller-keyed. Mutations do not invalidate reads
+automatically; invalidate affected keys after a successful write.
