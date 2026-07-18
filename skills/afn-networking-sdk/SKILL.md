@@ -50,7 +50,9 @@ source and tests before relying on any example below.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
-  fixtures; mock one logical call rather than URLSession retry attempts.
+  fixtures; finite stream stubs, progress callbacks, and wrapper-aware
+  type-wide matching mock one logical call rather than URLSession retry
+  attempts.
 
 ## Non-negotiable invariants
 

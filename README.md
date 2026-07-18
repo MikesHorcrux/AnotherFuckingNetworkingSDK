@@ -768,6 +768,10 @@ struct UserService: Sendable {
 Use `any APIClientResponseProtocol` instead when the service calls `sendResponse(_:)` or `sendPageResponse(_:)`. Both `APIClient` and `MockAPIClient` conform.
 
 Services that upload or download can depend on `any APIClientTransferProtocol`.
+Streaming services can depend on `any APIClientStreamingProtocol`; services
+that expose transfer progress can use `any APIClientTransferProgressProtocol`.
+`AuthenticatedAPIClient` conditionally preserves the progress protocol when
+its base client supports it.
 
 ## Testing support
 
@@ -850,6 +854,24 @@ so it deliberately does not execute a request's retry policy. Retry policy is
 excluded from exact wire identity and recordings, and explicit mock failures
 remain authoritative. Test fail-then-success transport behavior with
 `APIClient` and an isolated `URLProtocol` handler.
+
+Streaming mocks are finite and memory-backed, so they are deterministic without
+opening a socket:
+
+```swift
+await mock.stubStream(GetUserRequest.self, data: Data("chunk".utf8))
+let streaming: any APIClientStreamingProtocol = mock
+let stream = try await streaming.stream(GetUserRequest(id: 42))
+for try await byte in stream {
+    consume(byte)
+}
+```
+
+The same type-wide stream and response stubs work through
+`AuthenticatedAPIClient`; the mock records the injected bearer header while
+still matching the underlying request type. Exact stubs continue to match the
+fully decorated request and therefore remain the right choice when headers or
+bodies are part of the assertion.
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
