@@ -32,20 +32,27 @@ struct NetworkingLoggerTests {
         )
         let logger = NetworkingLogger(configuration: configuration) { _, _ in }
         var request = URLRequest(url: try #require(URL(
-            string: "https://alice:correct-horse@example.com/users?token=url-secret&query=public"
+            string: "https://alice:correct-horse@example.com/reset/path-secret?token=url-secret&accessToken=camel-query-secret&client_secret=client-query-secret&id_token=id-query-secret&query=public#fragment-secret"
         )))
         request.httpMethod = "POST"
         request.setValue("Bearer header-secret", forHTTPHeaderField: "AUTHORIZATION")
         request.setValue("safe", forHTTPHeaderField: "X-Public")
-        request.httpBody = Data(#"{"password":"body-secret","profile":{"name":"Ford","token":"nested-secret"},"items":[{"secret":"array-secret"}]}"#.utf8)
+        request.httpBody = Data(#"{"password":"body-secret","apiKey":"camel-body-secret","client_secret":"client-body-secret","profile":{"name":"Ford","token":"nested-secret"},"items":[{"secret":"array-secret"}]}"#.utf8)
 
         let command = logger.curlCommand(for: request)
 
         #expect(!command.contains("alice"))
         #expect(!command.contains("correct-horse"))
         #expect(!command.contains("url-secret"))
+        #expect(!command.contains("path-secret"))
+        #expect(!command.contains("camel-query-secret"))
+        #expect(!command.contains("client-query-secret"))
+        #expect(!command.contains("id-query-secret"))
         #expect(!command.contains("header-secret"))
+        #expect(!command.contains("fragment-secret"))
         #expect(!command.contains("body-secret"))
+        #expect(!command.contains("camel-body-secret"))
+        #expect(!command.contains("client-body-secret"))
         #expect(!command.contains("nested-secret"))
         #expect(!command.contains("array-secret"))
         #expect(command.contains("Ford"))
@@ -55,18 +62,25 @@ struct NetworkingLoggerTests {
 
     @Test("cURL values are POSIX quoted and headers are deterministic")
     func shellSafetyAndOrdering() throws {
-        let logger = NetworkingLogger { _, _ in }
+        let logger = NetworkingLogger(
+            configuration: .init(
+                bodyPolicy: .redactedJSON(maximumBytes: 1_000),
+                urlPathPolicy: .included
+            )
+        ) { _, _ in }
         var request = URLRequest(url: try #require(URL(
             string: "https://example.com/people/O'Brien"
         )))
         request.httpMethod = "PATCH"
         request.setValue("Zulu", forHTTPHeaderField: "Z-Last")
         request.setValue("O'Brien", forHTTPHeaderField: "A-First")
+        request.httpBody = Data(#"{"name":"O'Brien"}"#.utf8)
 
         let command = logger.curlCommand(for: request)
 
         #expect(command.contains("'https://example.com/people/O'\\''Brien'"))
         #expect(command.contains("'A-First: O'\\''Brien'"))
+        #expect(command.contains(#"O'\''Brien"#))
         let firstHeader = try #require(command.range(of: "A-First"))
         let lastHeader = try #require(command.range(of: "Z-Last"))
         #expect(firstHeader.lowerBound < lastHeader.lowerBound)
@@ -97,6 +111,33 @@ struct NetworkingLoggerTests {
         #expect(invalidCommand.contains("15 bytes"))
     }
 
+    @Test("The default body policy never exposes valid JSON")
+    func defaultBodyOmission() {
+        let logger = NetworkingLogger { _, _ in }
+        var request = URLRequest(url: URL(string: "https://example.com")!)
+        request.httpBody = Data(#"{"value":"default-secret"}"#.utf8)
+
+        let command = logger.curlCommand(for: request)
+
+        #expect(!command.contains("default-secret"))
+        #expect(command.contains("body omitted"))
+        #expect(!command.contains("--data-binary"))
+    }
+
+    @Test("Streaming bodies are never consumed for logging")
+    func streamingBodyOmission() {
+        let logger = NetworkingLogger(
+            configuration: .init(bodyPolicy: .redactedJSON(maximumBytes: 1_000))
+        ) { _, _ in }
+        var request = URLRequest(url: URL(string: "https://example.com")!)
+        request.httpBodyStream = InputStream(data: Data("stream-secret".utf8))
+
+        let command = logger.curlCommand(for: request)
+
+        #expect(!command.contains("stream-secret"))
+        #expect(command.contains("streaming body omitted"))
+    }
+
     @Test("Response URLs and JSON bodies use the same redaction policy")
     func responseRedaction() throws {
         let messages = LockedBox<[String]>([])
@@ -105,7 +146,9 @@ struct NetworkingLoggerTests {
         ) { _, message in
             messages.withLock { $0.append(message) }
         }
-        let url = try #require(URL(string: "https://example.com/callback?code=response-secret"))
+        let url = try #require(URL(
+            string: "https://example.com/callback/path-secret?code=response-secret"
+        ))
         let response = try #require(HTTPURLResponse(
             url: url,
             statusCode: 200,
@@ -118,6 +161,7 @@ struct NetworkingLoggerTests {
 
         let message = try #require(messages.withLock { $0.first })
         #expect(!message.contains("response-secret"))
+        #expect(!message.contains("path-secret"))
         #expect(!message.contains("body-secret"))
         #expect(message.contains("safe"))
         #expect(message.contains("redacted"))

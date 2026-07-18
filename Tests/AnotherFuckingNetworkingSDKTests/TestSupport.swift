@@ -167,19 +167,61 @@ final class LockedBox<Value>: @unchecked Sendable {
 
 actor AsyncSignal {
     private var isSignaled = false
-    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var continuations: [UUID: CheckedContinuation<Void, Never>] = [:]
 
-    func wait() async {
+    /// Waits for a signal without allowing a broken callback to hang the suite.
+    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async {
         guard !isSignaled else { return }
-        await withCheckedContinuation { continuation in
-            continuations.append(continuation)
+
+        let didSignal = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await self.waitForSignal()
+                return true
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                    return false
+                } catch {
+                    return true
+                }
+            }
+
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
         }
+
+        if !didSignal {
+            Issue.record("Timed out waiting for an asynchronous test signal")
+        }
+    }
+
+    private func waitForSignal() async {
+        guard !isSignaled else { return }
+        let id = UUID()
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if isSignaled || Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    continuations[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWait(id: id) }
+        }
+    }
+
+    private func cancelWait(id: UUID) {
+        continuations.removeValue(forKey: id)?.resume()
     }
 
     func signal() {
         guard !isSignaled else { return }
         isSignaled = true
-        let pending = continuations
+        let pending = continuations.values
         continuations.removeAll()
         for continuation in pending {
             continuation.resume()

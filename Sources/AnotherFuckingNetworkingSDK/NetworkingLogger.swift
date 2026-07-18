@@ -23,6 +23,15 @@ public struct NetworkingLogger: Sendable {
         case redactedJSON(maximumBytes: Int)
     }
 
+    /// Controls whether URL paths may appear in diagnostics.
+    public enum URLPathPolicy: Equatable, Sendable {
+        /// Replace every non-root path with the redaction placeholder.
+        case redacted
+
+        /// Include the path. Use only when paths cannot contain sensitive values.
+        case included
+    }
+
     /// Immutable logging and redaction settings.
     public struct Configuration: Sendable {
         public static let defaultRedactedHeaders: Set<String> = [
@@ -38,6 +47,8 @@ public struct NetworkingLogger: Sendable {
             "access_token",
             "refresh_token",
             "api_key",
+            "client_secret",
+            "id_token",
             "token",
             "password",
             "secret",
@@ -48,6 +59,8 @@ public struct NetworkingLogger: Sendable {
             "access_token",
             "refresh_token",
             "api_key",
+            "client_secret",
+            "id_token",
             "token",
             "authorization",
             "password",
@@ -55,28 +68,38 @@ public struct NetworkingLogger: Sendable {
             "code"
         ]
 
-        public var redactedHeaders: Set<String>
-        public var redactedQueryItems: Set<String>
-        public var redactedJSONKeys: Set<String>
-        public var bodyPolicy: BodyPolicy
-        public var redactionPlaceholder: String
+        public let redactedHeaders: Set<String>
+        public let redactedQueryItems: Set<String>
+        public let redactedJSONKeys: Set<String>
+        public let bodyPolicy: BodyPolicy
+        public let redactionPlaceholder: String
+        public let redactsURLFragment: Bool
+        public let urlPathPolicy: URLPathPolicy
 
         public init(
             redactedHeaders: Set<String> = Self.defaultRedactedHeaders,
             redactedQueryItems: Set<String> = Self.defaultRedactedQueryItems,
             redactedJSONKeys: Set<String> = Self.defaultRedactedJSONKeys,
             bodyPolicy: BodyPolicy = .omitted,
-            redactionPlaceholder: String = "<redacted>"
+            redactionPlaceholder: String = "<redacted>",
+            redactsURLFragment: Bool = true,
+            urlPathPolicy: URLPathPolicy = .redacted
         ) {
             self.redactedHeaders = Self.normalized(redactedHeaders)
             self.redactedQueryItems = Self.normalized(redactedQueryItems)
             self.redactedJSONKeys = Self.normalized(redactedJSONKeys)
             self.bodyPolicy = bodyPolicy
             self.redactionPlaceholder = redactionPlaceholder
+            self.redactsURLFragment = redactsURLFragment
+            self.urlPathPolicy = urlPathPolicy
+        }
+
+        fileprivate static func normalizedKey(_ value: String) -> String {
+            value.lowercased().filter { $0.isLetter || $0.isNumber }
         }
 
         private static func normalized(_ values: Set<String>) -> Set<String> {
-            Set(values.map { $0.lowercased() })
+            Set(values.map(normalizedKey(_:)))
         }
     }
 
@@ -133,7 +156,9 @@ public struct NetworkingLogger: Sendable {
                 : comparison == .orderedAscending
         }
         for (name, value) in headers {
-            let sanitizedValue = configuration.redactedHeaders.contains(name.lowercased())
+            let sanitizedValue = configuration.redactedHeaders.contains(
+                Configuration.normalizedKey(name)
+            )
                 ? configuration.redactionPlaceholder
                 : value
             arguments.append("--header")
@@ -167,14 +192,24 @@ public struct NetworkingLogger: Sendable {
         if components.password != nil {
             components.password = configuration.redactionPlaceholder
         }
+        if configuration.urlPathPolicy == .redacted,
+           !components.path.isEmpty,
+           components.path != "/" {
+            components.path = "/\(configuration.redactionPlaceholder)"
+        }
         components.queryItems = components.queryItems?.map { item in
-            guard configuration.redactedQueryItems.contains(item.name.lowercased()) else {
+            guard configuration.redactedQueryItems.contains(
+                Configuration.normalizedKey(item.name)
+            ) else {
                 return item
             }
             return URLQueryItem(
                 name: item.name,
                 value: item.value == nil ? nil : configuration.redactionPlaceholder
             )
+        }
+        if configuration.redactsURLFragment, components.fragment != nil {
+            components.fragment = configuration.redactionPlaceholder
         }
 
         return components.url ?? URL(string: "about:blank")!
@@ -214,7 +249,9 @@ public struct NetworkingLogger: Sendable {
         if let dictionary = value as? [String: Any] {
             return dictionary.reduce(into: [String: Any]()) { result, pair in
                 let (key, value) = pair
-                result[key] = configuration.redactedJSONKeys.contains(key.lowercased())
+                result[key] = configuration.redactedJSONKeys.contains(
+                    Configuration.normalizedKey(key)
+                )
                     ? configuration.redactionPlaceholder
                     : sanitizeJSON(value)
             }
