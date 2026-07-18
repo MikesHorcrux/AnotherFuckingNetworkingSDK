@@ -96,10 +96,19 @@ public final class BackgroundURLSessionDelegate: NSObject,
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
-        let resumeData = (error as NSError?)?.userInfo[
+        let candidateResumeData = (error as NSError?)?.userInfo[
             NSURLSessionDownloadTaskResumeData
         ] as? Data
-        let description = error.map { String(describing: $0) }
+        let resumeData = candidateResumeData.flatMap {
+            $0.count <= 8 * 1_024 * 1_024 ? $0 : nil
+        }
+        let description: String?
+        if let error {
+            let nsError = error as NSError
+            description = "\(nsError.domain) (\(nsError.code))"
+        } else {
+            description = nil
+        }
         eventHandler(.completed(
             taskIdentifier: task.taskIdentifier,
             errorDescription: description,
