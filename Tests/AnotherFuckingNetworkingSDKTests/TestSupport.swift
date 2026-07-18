@@ -187,8 +187,9 @@ actor AsyncSignal {
     private var continuations: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     /// Waits for a signal without allowing a broken callback to hang the suite.
-    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async {
-        guard !isSignaled else { return }
+    @discardableResult
+    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async -> Bool {
+        guard !isSignaled else { return true }
 
         let didSignal = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
@@ -212,6 +213,7 @@ actor AsyncSignal {
         if !didSignal {
             Issue.record("Timed out waiting for an asynchronous test signal")
         }
+        return didSignal
     }
 
     private func waitForSignal() async {

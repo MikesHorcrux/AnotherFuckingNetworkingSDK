@@ -22,9 +22,14 @@ final class FileIOExecutor: Sendable {
     )
 
     private let queue: DispatchQueue
+    private let onOperationScheduled: (@Sendable () -> Void)?
 
-    init(queue: DispatchQueue) {
+    init(
+        queue: DispatchQueue,
+        onOperationScheduled: (@Sendable () -> Void)? = nil
+    ) {
         self.queue = queue
+        self.onOperationScheduled = onOperationScheduled
     }
 
     func run<Value: Sendable>(
@@ -32,6 +37,7 @@ final class FileIOExecutor: Sendable {
     ) async throws -> Value {
         try Task.checkCancellation()
         let workState = CriticalState(WorkState())
+        onOperationScheduled?()
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -80,6 +86,7 @@ final class FileIOExecutor: Sendable {
     ) async throws -> Value {
         try Task.checkCancellation()
         let workState = CriticalState(CommittedWorkState())
+        onOperationScheduled?()
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -110,6 +117,7 @@ final class FileIOExecutor: Sendable {
     /// Runs best-effort resource cleanup even when the awaiting task is already
     /// cancelled. Cleanup remains off Swift's cooperative executor.
     func runCleanup(_ operation: @escaping @Sendable () -> Void) async {
+        onOperationScheduled?()
         await withCheckedContinuation { continuation in
             queue.async {
                 operation()

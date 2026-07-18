@@ -386,10 +386,10 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
+        let configuration = state.withCriticalRegion { $0 }
         try await fileIOExecutor.run {
             try Self.validateDownloadDestination(destination)
         }
-        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -406,13 +406,15 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             try Self.throwTransportError(error)
         }
 
+        let httpResponse: HTTPURLResponse
         do {
             try Task.checkCancellation()
-            guard let httpResponse = response as? HTTPURLResponse else {
+            guard let response = response as? HTTPURLResponse else {
                 logger?.log(response: response, data: Data())
                 try Task.checkCancellation()
                 throw NetworkError.invalidResponse
             }
+            httpResponse = response
 
             guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
                 let errorData = try await fileIOExecutor.run {
@@ -428,30 +430,35 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
 
             logger?.log(response: response, data: Data())
             try Task.checkCancellation()
-            let storedURL: URL
-            do {
-                storedURL = try await fileIOExecutor.runCommitted {
-                    try Self.storeDownloadedFile(
-                        at: temporaryURL,
-                        destination: destination
-                    )
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let error as NetworkError {
-                throw error
-            } catch {
-                throw NetworkError.fileOperationFailed(error)
-            }
-
-            return DownloadResponse(
-                fileURL: storedURL,
-                metadata: HTTPResponseMetadata(httpResponse)
-            )
         } catch {
             await discardDownloadedFile(at: temporaryURL)
+            try Task.checkCancellation()
             throw error
         }
+
+        let storedURL: URL
+        do {
+            storedURL = try await fileIOExecutor.runCommitted {
+                try Self.storeDownloadedFile(
+                    at: temporaryURL,
+                    destination: destination
+                )
+            }
+        } catch is CancellationError {
+            await discardDownloadedFile(at: temporaryURL)
+            throw CancellationError()
+        } catch let error as NetworkError {
+            await discardDownloadedFile(at: temporaryURL)
+            throw error
+        } catch {
+            await discardDownloadedFile(at: temporaryURL)
+            throw NetworkError.fileOperationFailed(error)
+        }
+
+        return DownloadResponse(
+            fileURL: storedURL,
+            metadata: HTTPResponseMetadata(httpResponse)
+        )
     }
 
     private enum RequestBodySource: Sendable {

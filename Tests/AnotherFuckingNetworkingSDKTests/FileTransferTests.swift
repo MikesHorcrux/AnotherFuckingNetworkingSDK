@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import Testing
 @testable import AnotherFuckingNetworkingSDK
@@ -250,6 +251,81 @@ struct FileTransferTests {
         #expect(try Data(contentsOf: response.fileURL) == payload)
         #expect(response.statusCode == 206)
         #expect(response.value(forHTTPHeaderField: "etag") == "fixture-tag")
+    }
+
+    @Test("Downloads snapshot client configuration before destination preflight")
+    func downloadConfigurationSnapshotPrecedesPreflight() async throws {
+        let queue = DispatchQueue(label: "download-configuration-snapshot")
+        let releasePreflight = DispatchSemaphore(value: 0)
+        defer { releasePreflight.signal() }
+        let blockerStarted = AsyncSignal()
+        let preflightScheduled = AsyncSignal()
+        let scheduledOperations = LockedBox(0)
+        let executor = FileIOExecutor(
+            queue: queue,
+            onOperationScheduled: {
+                let count = scheduledOperations.withLock { count in
+                    count += 1
+                    return count
+                }
+                if count == 1 {
+                    Task { await preflightScheduled.signal() }
+                }
+            }
+        )
+        queue.async {
+            Task { await blockerStarted.signal() }
+            releasePreflight.wait()
+        }
+        guard await blockerStarted.wait() else { return }
+
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try Data("snapshotted".utf8).write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
+        let capturedRequest = LockedBox<URLRequest?>(nil)
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
+        }
+        let initialBaseURL = URL(string: "https://initial.example/v1")!
+        let client = stub.client(
+            baseURL: initialBaseURL,
+            globalHeaders: ["X-Configuration": "initial"],
+            fileIOExecutor: executor,
+            downloadOperation: { request in
+                capturedRequest.withLock { $0 = request }
+                return (
+                    ownedDownloadURL,
+                    try StubURLProtocol.StubResponse.http(
+                        for: request,
+                        data: Data("snapshotted".utf8)
+                    ).response
+                )
+            }
+        )
+        let task = Task {
+            try await client.download(DownloadFixtureRequest())
+        }
+
+        guard await preflightScheduled.wait() else {
+            task.cancel()
+            releasePreflight.signal()
+            _ = try? await task.value
+            return
+        }
+        client.updateConfiguration { configuration in
+            configuration.baseURL = URL(string: "https://updated.example/v2")!
+            configuration.globalHeaders = ["X-Configuration": "updated"]
+        }
+        releasePreflight.signal()
+
+        let response = try await task.value
+        defer { try? FileManager.default.removeItem(at: response.fileURL) }
+        let request = try #require(capturedRequest.withLock { $0 })
+        #expect(request.url?.host == initialBaseURL.host)
+        #expect(request.url?.path == "/v1/downloads/file")
+        #expect(
+            request.value(forHTTPHeaderField: "X-Configuration") == "initial"
+        )
     }
 
     @Test("Download status policies accept custom statuses")
@@ -555,6 +631,79 @@ struct FileTransferTests {
         }
 
         #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
+    }
+
+    @Test("Cancellation during pre-commit cleanup remains cancellation")
+    func cancellationWinsDuringPreCommitCleanup() async throws {
+        let queue = DispatchQueue(label: "download-precommit-cleanup")
+        let releaseCleanup = DispatchSemaphore(value: 0)
+        defer { releaseCleanup.signal() }
+        let cleanupBlockerStarted = AsyncSignal()
+        let cleanupScheduled = AsyncSignal()
+        let scheduledOperations = LockedBox(0)
+        let executor = FileIOExecutor(
+            queue: queue,
+            onOperationScheduled: {
+                let count = scheduledOperations.withLock { count in
+                    count += 1
+                    return count
+                }
+                if count == 2 {
+                    Task { await cleanupScheduled.signal() }
+                }
+            }
+        )
+        let monitor = NetworkActivityMonitor()
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try Data("invalid-response".utf8).write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
+        }
+        let client = stub.client(
+            activityMonitor: monitor,
+            fileIOExecutor: executor,
+            downloadOperation: { request in
+                queue.async {
+                    Task { await cleanupBlockerStarted.signal() }
+                    releaseCleanup.wait()
+                }
+                await cleanupBlockerStarted.wait()
+                return (
+                    ownedDownloadURL,
+                    URLResponse(
+                        url: try #require(request.url),
+                        mimeType: nil,
+                        expectedContentLength: 16,
+                        textEncodingName: nil
+                    )
+                )
+            }
+        )
+        let task = Task {
+            try await client.download(DownloadFixtureRequest())
+        }
+
+        guard await cleanupScheduled.wait() else {
+            task.cancel()
+            releaseCleanup.signal()
+            _ = try? await task.value
+            return
+        }
+        task.cancel()
+        releaseCleanup.signal()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected cancellation during pre-commit cleanup")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
+        let snapshot = monitor.currentSnapshot
+        #expect(snapshot.cancelledCount == 1)
+        #expect(snapshot.failedCount == 0)
     }
 
     @Test("Oversized failed downloads preserve metadata without loading bodies")
