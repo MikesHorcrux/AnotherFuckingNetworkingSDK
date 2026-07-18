@@ -92,6 +92,7 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
     private let completionSignal = AsyncSignal()
     private let receivedMessageSignal = AsyncSignal()
     private let receivedPingSignal = AsyncSignal()
+    private let receivedCloseSignal = AsyncSignal()
 
     private init(behavior: Behavior) throws {
         self.behavior = behavior
@@ -161,6 +162,10 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
 
     func waitForPing() async {
         await receivedPingSignal.wait()
+    }
+
+    func waitForClose() async {
+        await receivedCloseSignal.wait()
     }
 
     func send(_ message: WebSocketMessage) async throws {
@@ -477,6 +482,7 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
                     state.sentClose = true
                     return true
                 }
+                Task { await receivedCloseSignal.signal() }
                 if shouldEcho {
                     let response = Self.makeFrame(
                         opcode: 0x8,
