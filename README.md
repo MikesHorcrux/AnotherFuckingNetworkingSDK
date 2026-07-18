@@ -731,6 +731,29 @@ func makeActivityModel(
 Only the small presentation adapter runs on the main actor. URL construction,
 encoding, URLSession work, logging, and decoding remain outside it.
 
+## Telemetry and metrics
+
+Telemetry is separate from logging and opt-in. Events contain operation and
+attempt IDs, durations, status codes, bounded byte counts, and coarse error
+categories—never URLs, headers, bodies, tokens, or localized error strings:
+
+```swift
+let telemetry = NetworkTelemetry { event in
+    metricsActor.record(event)
+}
+
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    telemetry: telemetry
+)
+```
+
+`NetworkTelemetryExporter` provides a vendor-neutral bridge for OpenTelemetry
+or another metrics system. Keep exporters lightweight and enqueue work to an
+actor; delivery is synchronous and the default client has no telemetry cost.
+Stream completion is recorded at EOF, cancellation, failure, or deallocation,
+not when headers first arrive. See [Telemetry and metrics](docs/telemetry.md).
+
 ## Safe request logging
 
 Logging is disabled unless a logger is passed to the client.

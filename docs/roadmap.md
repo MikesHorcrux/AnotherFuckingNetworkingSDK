@@ -15,6 +15,7 @@ roadmap item is not a shipped feature.
 - Opt-in upload/download progress events with bounded byte counts and phases.
 - Durable `TransferJob` records, JSON persistence, and cancellation-safe
   orchestration seams for app-owned background sessions.
+- Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
@@ -24,8 +25,8 @@ roadmap item is not a shipped feature.
 1. **Platform background/resumable adapters** — background URLSession delegate
    rebinding, system completion handlers, resume-data validation, and relaunch
    integration on each supported Apple platform.
-2. **Telemetry** — operation/attempt IDs, duration, bytes, task metrics, and an
-   optional OpenTelemetry bridge.
+2. **Platform task-metrics adapters** — delegate-backed URLSession metrics
+   capture where each platform/API exposes it.
 3. **Streaming multipart** — file-backed parts and bounded encoding.
 4. **WebSocket reliability policies** — reconnect, heartbeat, backoff, and
    session restoration as opt-in wrappers.

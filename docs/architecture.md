@@ -75,6 +75,8 @@ Policies are values or wrappers, not hidden global switches:
 - `HTTPRetryPolicy` decides whether a failed attempt may be replayed.
 - `AuthenticatedAPIClient` adds credentials and a bounded 401 recovery policy.
 - `NetworkActivityMonitor` and `NetworkingLogger` are opt-in observers.
+- `NetworkTelemetry` emits privacy-safe operation and attempt events without
+  coupling the core to a metrics vendor.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 
 This keeps the default client fast and avoids forcing cache, telemetry,

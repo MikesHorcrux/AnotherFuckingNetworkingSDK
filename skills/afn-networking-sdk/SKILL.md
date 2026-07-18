@@ -52,6 +52,8 @@ source and tests before relying on any example below.
   buffering, lifecycle state, and Observation adapters.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
+- Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
+  `NetworkTelemetryExporter`; keep exporters lightweight and vendor-neutral.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
