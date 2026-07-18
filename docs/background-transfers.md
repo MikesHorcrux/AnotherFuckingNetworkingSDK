@@ -39,6 +39,31 @@ run on the SDK's utility file-I/O queue.
 
 ## Integrating a background session
 
+`BackgroundURLSessionAdapter` owns the Foundation background session and
+translates delegate callbacks into `BackgroundTransferEvent` values. It is
+intentionally request-agnostic: the application still resolves `requestKey`,
+adds current credentials, and commits downloaded files.
+
+```swift
+let adapter = BackgroundURLSessionAdapter(
+    identifier: "com.example.exports",
+    eventHandler: { event in
+        Task { await backgroundEventRouter.handle(event) }
+    }
+)
+
+adapter.setBackgroundEventsCompletionHandler {
+    applicationCompletionHandler()
+}
+
+let task = adapter.download(requestURLRequest, resumeData: job.resumeData)
+```
+
+The delegate emits bounded progress, temporary download locations, completion
+errors, opaque resume data, and a final `backgroundEventsFinished` event. The
+system completion handler is invoked only after that terminal event. Keep the
+adapter alive for the session's lifetime and route events to the coordinator.
+
 The operation closure is the bridge to the application or a future dedicated
 background product. It receives the restored job and a checkpoint callback.
 Checkpoint data can contain `URLSession` resume data or another bounded,
@@ -79,12 +104,11 @@ let finished = try await coordinator.execute(id: job.id) { job, checkpoint in
 }
 ```
 
-The `backgroundSession` in this example is application code or a dedicated
-platform adapter; it is not part of the foreground `APIClient` convenience
-initializer. The adapter should own the `URLSessionConfiguration.background`
-identifier, delegate rebinding, system completion handler, resume-data
-validation, and destination commit. The coordinator owns durable job state and
-must remain the single writer for that state.
+The `backgroundSession` in this example can be the adapter above or another
+application-owned implementation. The coordinator owns durable job state and
+must remain the single writer for that state. Validate resume data before
+resuming and move a finished temporary file to its destination before marking
+the job succeeded.
 
 ## Cancellation and relaunch
 
@@ -110,6 +134,6 @@ data-retention policy.
 - Test relaunch and duplicate delegate callbacks with a real background-session
   integration target on each supported Apple platform.
 
-The current module is a durable orchestration boundary, not a claim that every
-Apple platform exposes identical background-session behavior. Platform-specific
-delegate adapters remain on the [roadmap](roadmap.md).
+The adapter is available on the package's iOS 15/macOS 12 baseline. Platform
+behavior still needs device/relaunch integration coverage, and platform APIs
+may differ; keep those checks in the application lifecycle target.
