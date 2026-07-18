@@ -51,7 +51,9 @@ policy.
 `NetworkTaskMetricsSnapshot` is the stable event field for platform task
 metrics. It is optional because Foundation does not expose identical metrics
 for every async URLSession API and supported OS release. A platform adapter can
-populate it when delegate metrics are available; absence is not a failure.
+populate it from `NetworkTaskMetricsSnapshot(urlSessionMetrics)` when delegate
+metrics are available; absence is not a failure. The adapter retains timing
+values only and never retains URL, host, headers, or payload data.
 
 ## Performance and privacy
 

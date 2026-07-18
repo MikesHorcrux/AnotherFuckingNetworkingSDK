@@ -47,6 +47,40 @@ public struct NetworkTaskMetricsSnapshot: Equatable, Sendable {
         self.secureConnectionDurationNanoseconds = secureConnectionDurationNanoseconds
         self.requestDurationNanoseconds = requestDurationNanoseconds
     }
+
+    /// Converts the last Foundation transaction into the stable telemetry
+    /// subset. Call this from `URLSessionTaskDelegate`'s
+    /// `didFinishCollecting` callback; no URL, host, headers, or payload data
+    /// are retained.
+    public init(_ metrics: URLSessionTaskMetrics) {
+        let transaction = metrics.transactionMetrics.last
+        self.init(
+            fetchStart: transaction?.fetchStartDate,
+            responseStart: transaction?.responseStartDate,
+            responseEnd: transaction?.responseEndDate,
+            domainLookupDurationNanoseconds: Self.duration(
+                from: transaction?.domainLookupStartDate,
+                to: transaction?.domainLookupEndDate
+            ),
+            secureConnectionDurationNanoseconds: Self.duration(
+                from: transaction?.secureConnectionStartDate,
+                to: transaction?.secureConnectionEndDate
+            ),
+            requestDurationNanoseconds: Self.duration(
+                from: transaction?.requestStartDate,
+                to: transaction?.responseEndDate
+            )
+        )
+    }
+
+    private static func duration(from start: Date?, to end: Date?) -> UInt64? {
+        guard let start, let end, end >= start else { return nil }
+        let interval = end.timeIntervalSince(start)
+        guard interval.isFinite, interval >= 0 else { return nil }
+        let nanoseconds = interval * 1_000_000_000
+        guard nanoseconds < Double(UInt64.max) else { return UInt64.max }
+        return UInt64(nanoseconds.rounded(.towardZero))
+    }
 }
 
 /// One privacy-safe operation or attempt observation.

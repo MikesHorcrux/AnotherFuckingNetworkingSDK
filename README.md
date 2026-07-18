@@ -800,7 +800,9 @@ let client = APIClient(
 or another metrics system. Keep exporters lightweight and enqueue work to an
 actor; delivery is synchronous and the default client has no telemetry cost.
 Stream completion is recorded at EOF, cancellation, failure, or deallocation,
-not when headers first arrive. See [Telemetry and metrics](docs/telemetry.md).
+not when headers first arrive. Delegate-owned integrations can convert
+`URLSessionTaskMetrics` with `NetworkTaskMetricsSnapshot(metrics)`; only timing
+values are retained. See [Telemetry and metrics](docs/telemetry.md).
 
 ## Safe request logging
 

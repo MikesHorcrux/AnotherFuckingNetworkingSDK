@@ -54,7 +54,9 @@ source and tests before relying on any example below.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
-  `NetworkTelemetryExporter`; keep exporters lightweight and vendor-neutral.
+  `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters
+  lightweight and vendor-neutral. Map Foundation delegate metrics through the
+  snapshot initializer without retaining URL or payload data.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
 - Response caching: `CachedAPIClient` and `ResponseCachePolicy`; bounded

@@ -27,8 +27,9 @@ roadmap item is not a shipped feature.
 1. **Platform background/resumable adapters** — background URLSession delegate
    rebinding, system completion handlers, resume-data validation, and relaunch
    integration on each supported Apple platform.
-2. **Platform task-metrics adapters** — delegate-backed URLSession metrics
-   capture where each platform/API exposes it.
+2. **Platform task-metrics integration** — wire the shipped
+   `NetworkTaskMetricsSnapshot(URLSessionTaskMetrics)` adapter into each
+   delegate-backed operation where the platform exposes metrics.
 3. **Streaming multipart** — file-backed parts and bounded encoding.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
    adapters and oldest-target integration coverage.
