@@ -25,6 +25,31 @@ struct NetworkingLoggerTests {
         #expect(captured[1].1.hasPrefix("Response 200"))
     }
 
+    @Test("Minimum levels skip lower-level message construction")
+    func minimumLevel() throws {
+        let messages = LockedBox<[(NetworkingLogger.Level, String)]>([])
+        let logger = NetworkingLogger(
+            configuration: .init(minimumLevel: .info)
+        ) { level, message in
+            messages.withLock { $0.append((level, message)) }
+        }
+        let url = URL(string: "https://example.com/secret")!
+        let request = URLRequest(url: url)
+        let response = try #require(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        ))
+
+        logger.log(request: request)
+        logger.log(response: response, data: Data())
+
+        let captured = messages.withLock { $0 }
+        #expect(captured.count == 1)
+        #expect(captured.first?.0 == .info)
+    }
+
     @Test("Headers, query values, URL credentials, and nested JSON are redacted")
     func comprehensiveRedaction() throws {
         let configuration = NetworkingLogger.Configuration(

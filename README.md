@@ -460,7 +460,8 @@ Logging is disabled unless a logger is passed to the client.
 ```swift
 let logger = NetworkingLogger(
     configuration: .init(
-        bodyPolicy: .redactedJSON(maximumBytes: 16_384)
+        bodyPolicy: .redactedJSON(maximumBytes: 16_384),
+        minimumLevel: .info
     )
 )
 
@@ -472,7 +473,7 @@ let client = APIClient(
 
 The logger redacts URL paths by default because identifiers and reset tokens often appear in path components. It also redacts common authorization, cookie, API-key, token, password, secret, and OAuth-code fields; recursively redacts configured JSON keys; omits invalid, binary, or oversized bodies; removes URL credentials and fragments; sorts output deterministically; and POSIX-quotes cURL arguments.
 
-Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API.
+Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API. Raising `minimumLevel` skips lower-level message construction entirely; for example, `.info` avoids building request cURL strings.
 
 You can inject a `Sendable` sink for tests or another logging backend:
 
