@@ -260,6 +260,39 @@ status still requires `EmptyResponse`, `RawDataRequest`, or an explicit
 `allowsEmptyResponseBody` implementation. Rejected statuses retain their
 metadata and body through `NetworkError.requestFailed(HTTPFailure)`.
 
+## Authentication and token refresh
+
+Wrap a transfer-capable client with `AuthenticatedAPIClient` when requests
+need bearer authentication. `SingleFlightTokenProvider` caches valid tokens
+and coalesces concurrent loads or refreshes, so a burst of requests does not
+stampede the identity service:
+
+```swift
+let authenticator = SingleFlightTokenProvider(
+    loader: {
+        try await loadAccessTokenFromKeychain()
+    },
+    refreshLoader: {
+        try await refreshAccessToken()
+    }
+)
+
+let authenticated = AuthenticatedAPIClient(
+    client: client,
+    authenticator: authenticator
+)
+```
+
+The wrapper applies `Authorization: Bearer ...` after request customization,
+so endpoint signing code cannot accidentally replace the credential. A 401
+response triggers one refresh and one replay of the original typed request;
+idempotent methods are replayable by default, while POST/PATCH-style mutations
+must set `authenticationReplaySafety = .explicitlyReplayable`. Other failures
+and accepted 401 statuses are left unchanged. The same policy covers ordinary
+requests, pagination, uploads, downloads, and byte streams.
+Implement `HTTPAuthenticator` when credentials come from a different secure
+session or identity system.
+
 ## Replay-safe retries
 
 Requests never retry by default. Opt in per endpoint with a bounded value
