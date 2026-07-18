@@ -259,62 +259,38 @@ public extension WebSocketConnectionProtocol {
 /// A bounded asynchronous sequence of WebSocket lifecycle states.
 public struct WebSocketConnectionStates: AsyncSequence, Sendable {
     public typealias Element = WebSocketConnectionState
+    public typealias AsyncIterator = AsyncStream<Element>.Iterator
 
-    fileprivate enum Source: Sendable {
-        case stream(
-            @Sendable () -> AsyncStream<WebSocketConnectionState>
-        )
-        case current(@Sendable () async -> WebSocketConnectionState)
-    }
-
-    private let source: Source
+    private let makeStream: @Sendable () -> AsyncStream<Element>
 
     package init(
-        stream: @escaping @Sendable () -> AsyncStream<
-            WebSocketConnectionState
-        >
+        stream: @escaping @Sendable () -> AsyncStream<Element>
     ) {
-        source = .stream(stream)
+        makeStream = stream
     }
 
     fileprivate init(
         currentState: @escaping @Sendable () async -> WebSocketConnectionState
     ) {
-        source = .current(currentState)
-    }
-
-    public func makeAsyncIterator() -> Iterator {
-        Iterator(source: source)
-    }
-
-    public struct Iterator: AsyncIteratorProtocol {
-        private var streamIterator: AsyncStream<
-            WebSocketConnectionState
-        >.Iterator?
-        private let currentState: (
-            @Sendable () async -> WebSocketConnectionState
-        )?
-        private var emittedCurrentState = false
-
-        fileprivate init(source: Source) {
-            switch source {
-            case .stream(let makeStream):
-                streamIterator = makeStream().makeAsyncIterator()
-                currentState = nil
-            case .current(let currentState):
-                streamIterator = nil
-                self.currentState = currentState
+        makeStream = {
+            AsyncStream(bufferingPolicy: .bufferingNewest(1)) {
+                continuation in
+                let task = Task {
+                    let state = await currentState()
+                    if !Task.isCancelled {
+                        continuation.yield(state)
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in
+                    task.cancel()
+                }
             }
         }
+    }
 
-        public mutating func next() async -> WebSocketConnectionState? {
-            if streamIterator != nil {
-                return await streamIterator?.next()
-            }
-            guard !emittedCurrentState, let currentState else { return nil }
-            emittedCurrentState = true
-            return await currentState()
-        }
+    public func makeAsyncIterator() -> AsyncIterator {
+        makeStream().makeAsyncIterator()
     }
 }
 
