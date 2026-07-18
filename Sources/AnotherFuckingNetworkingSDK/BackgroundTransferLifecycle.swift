@@ -8,6 +8,7 @@ public enum BackgroundTransferLifecycleOutcome: Equatable, Sendable {
         route: BackgroundTransferRoute,
         temporaryURL: URL
     )
+    case paused(TransferJob)
     case committed(TransferJob)
     case failed(TransferJob)
     case metrics(
@@ -106,8 +107,19 @@ public actor BackgroundTransferLifecycleCoordinator {
             return .downloadStaged(route: route, temporaryURL: temporaryURL)
         case .completed(_, let errorDescription, _):
             if let errorDescription {
+                let job = try await requiredJob(for: route)
+                if let resumeData = eventResumeData(event), !resumeData.isEmpty {
+                    let paused = try await coordinator.pause(
+                        id: job.id,
+                        resumeData: resumeData
+                    )
+                    temporaryDownloads.removeValue(
+                        forKey: route.taskIdentifier
+                    )
+                    return .paused(paused)
+                }
                 let failed = try await coordinator.recordFailure(
-                    id: route.jobID,
+                    id: job.id,
                     failure: Self.failureIdentity(from: errorDescription)
                 )
                 temporaryDownloads.removeValue(
@@ -190,6 +202,15 @@ public actor BackgroundTransferLifecycleCoordinator {
                 )
             )
         )
+    }
+
+    private func eventResumeData(
+        _ event: BackgroundTransferEvent
+    ) -> Data? {
+        guard case .completed(_, _, let resumeData) = event else {
+            return nil
+        }
+        return resumeData
     }
 
     private static func failureIdentity(

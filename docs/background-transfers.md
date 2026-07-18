@@ -111,6 +111,8 @@ guarantees:
 - progress checkpoints carry the route's upload/download direction and the
   restored attempt number;
 - a temporary download URL is retained only until its terminal callback;
+- a completion carrying bounded resume data becomes a paused job and retains
+  that opaque data for the next request resolution;
 - `commitDownload` runs before `commitSuccess`, so a failed file move leaves
   the durable job non-terminal; and
 - malformed callback error text becomes a bounded, privacy-safe domain/code
@@ -146,8 +148,8 @@ let adapter = BackgroundURLSessionAdapter(
 ```
 
 The coordinator returns a `BackgroundTransferLifecycleOutcome` for progress,
-staged downloads, committed jobs, failures, metrics, and the session-wide
-completion event. Unknown task identifiers return `nil`, making stale callbacks
+staged downloads, resumable pauses, committed jobs, failures, metrics, and the
+session-wide completion event. Unknown task identifiers return `nil`, making stale callbacks
 from a replaced session harmless. Keep route bindings until the application
 has finished its own cleanup; the coordinator deliberately does not unbind
 them automatically so duplicate terminal callbacks remain idempotent.

@@ -601,8 +601,9 @@ let adapter = BackgroundURLSessionAdapter(
 )
 ```
 
-The lifecycle actor ignores stale task identifiers, preserves bounded failure
-identity, and leaves route bindings intact for explicit application cleanup.
+The lifecycle actor ignores stale task identifiers, turns bounded resume data
+into a paused job, preserves bounded failure identity, and leaves route
+bindings intact for explicit application cleanup.
 Use a serial delegate queue or an application event queue when callback order
 is significant; do not perform expensive file work directly in Foundation's
 delegate callback.
