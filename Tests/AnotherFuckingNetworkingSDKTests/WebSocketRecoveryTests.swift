@@ -22,7 +22,7 @@ struct WebSocketRecoveryTests {
         ) {
             try await store.remove(for: "")
         }
-        await #expect(
+        #expect(
             throws: WebSocketRecoveryStoreError.payloadTooLarge(
                 maximumBytes: WebSocketRecoveryState.maximumPayloadBytes,
                 actualBytes: WebSocketRecoveryState.maximumPayloadBytes + 1
