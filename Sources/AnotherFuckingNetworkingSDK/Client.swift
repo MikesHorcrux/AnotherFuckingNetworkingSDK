@@ -42,12 +42,18 @@ public extension APIClientTransferProtocol {
     }
 }
 
+typealias WebSocketTransportFactory = @Sendable (
+    URLSession,
+    URLRequest,
+    Int?
+) -> any WebSocketTransport
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientTransferProtocol, Sendable {
+public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -96,14 +102,41 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
     private let state: Locked<Configuration>
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
+    private let webSocketTransportFactory: WebSocketTransportFactory
 
-    public init(
+    public convenience init(
         baseURL: URL? = nil,
         urlSession: URLSession = .shared,
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil
+    ) {
+        self.init(
+            baseURL: baseURL,
+            urlSession: urlSession,
+            globalHeaders: globalHeaders,
+            encoderFactory: encoderFactory,
+            decoderFactory: decoderFactory,
+            logger: logger,
+            webSocketTransportFactory: { session, request, maximumMessageSize in
+                URLSessionWebSocketTransport(
+                    session: session,
+                    request: request,
+                    maximumMessageSize: maximumMessageSize
+                )
+            }
+        )
+    }
+
+    init(
+        baseURL: URL? = nil,
+        urlSession: URLSession = .shared,
+        globalHeaders: [String: String] = [:],
+        encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
+        decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
+        logger: NetworkingLogger? = nil,
+        webSocketTransportFactory: @escaping WebSocketTransportFactory
     ) {
         state = Locked(
             Configuration(
@@ -115,6 +148,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         )
         self.urlSession = urlSession
         self.logger = logger
+        self.webSocketTransportFactory = webSocketTransportFactory
     }
 
     /// Atomically updates multiple configuration values.
@@ -122,6 +156,54 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         _ update: @Sendable (inout Configuration) -> Void
     ) {
         state.withLock(update)
+    }
+
+    /// Opens a WebSocket after its HTTP upgrade handshake succeeds.
+    ///
+    /// The connection uses the same base URL, global headers, cookies,
+    /// authentication challenges, and URL session as ordinary requests.
+    public func connect<R: WebSocketRequest>(
+        _ request: R
+    ) async throws -> any WebSocketConnectionProtocol {
+        try Task.checkCancellation()
+        let configuration = state.withLock { $0 }
+        let urlRequest = try WebSocketRequestBuilder.make(
+            request,
+            baseURL: configuration.baseURL,
+            globalHeaders: configuration.globalHeaders
+        )
+        guard let url = urlRequest.url else {
+            throw WebSocketError.invalidURL
+        }
+
+        logger?.log(request: urlRequest)
+        let transport = webSocketTransportFactory(
+            urlSession,
+            urlRequest,
+            request.maximumMessageSize
+        )
+
+        do {
+            let negotiatedSubprotocol = try await transport.open()
+            try Task.checkCancellation()
+            return WebSocketConnection(
+                url: url,
+                negotiatedSubprotocol: negotiatedSubprotocol,
+                transport: transport
+            )
+        } catch {
+            if Task.isCancelled || error is CancellationError {
+                transport.cancel()
+                throw CancellationError()
+            }
+            if let error = error as? WebSocketError {
+                throw error
+            }
+            if let error = error as? URLError {
+                throw WebSocketError.transport(error)
+            }
+            throw WebSocketError.unknown(error)
+        }
     }
 
     /// Sends a request and decodes its declared response type.
