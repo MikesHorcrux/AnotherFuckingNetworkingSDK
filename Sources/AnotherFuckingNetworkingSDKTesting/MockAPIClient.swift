@@ -776,6 +776,8 @@ public actor MockAPIClient: APIClientTransferProgressProtocol, APIClientStreamin
             totalBytes = Int64(data.count)
         case .file:
             totalBytes = nil
+        case .multipart(let form):
+            totalBytes = form.estimatedByteCount
         }
         progress(TransferProgress(
             operation: .upload,
@@ -1003,7 +1005,7 @@ public actor MockAPIClient: APIClientTransferProgressProtocol, APIClientStreamin
         switch operation {
         case .upload(.data(let data)):
             urlRequest.httpBody = data
-        case .upload(.file):
+        case .upload(.file), .upload(.multipart):
             urlRequest.httpBody = nil
         case .download:
             do {
@@ -1380,6 +1382,8 @@ private extension MockAPIClient {
                 argument = .uploadData(data)
             case .upload(.file(let url)):
                 argument = .uploadFile(url.absoluteString)
+            case .upload(.multipart(let form)):
+                argument = .uploadMultipart(form)
             case .download(.temporary):
                 argument = .downloadTemporary
             case .download(.file(let url, let overwriteExisting)):
@@ -1394,6 +1398,7 @@ private extension MockAPIClient {
     enum TransferArgumentSignature: Hashable, Sendable {
         case uploadData(Data)
         case uploadFile(String)
+        case uploadMultipart(StreamingMultipartFormData)
         case downloadTemporary
         case downloadFile(String, overwriteExisting: Bool)
     }

@@ -374,6 +374,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             return Int64(data.count)
         case .file:
             return nil
+        case .multipart(let form):
+            return form.estimatedByteCount
         }
     }
 
@@ -776,6 +778,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
 
         let bodySource: RequestBodySource
         let totalBytes: Int64?
+        var multipartFileURL: URL? = nil
         switch body {
         case .data(let data):
             bodySource = .provided(data)
@@ -787,13 +790,27 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 return values.fileSize.map(Int64.init)
             }
             bodySource = .provided(nil)
+            multipartFileURL = nil
+        case .multipart(let form):
+            let fileURL = try await prepareMultipartUpload(form)
+            multipartFileURL = fileURL
+            totalBytes = form.estimatedByteCount
+            bodySource = .provided(nil)
         }
 
-        let urlRequest = try Self.makeURLRequest(
-            request,
-            configuration: configuration,
-            bodySource: bodySource
-        )
+        let urlRequest: URLRequest
+        do {
+            urlRequest = try Self.makeURLRequest(
+                request,
+                configuration: configuration,
+                bodySource: bodySource
+            )
+        } catch {
+            if let multipartFileURL {
+                await discardUploadedFile(at: multipartFileURL)
+            }
+            throw error
+        }
 
         let attemptState = CriticalState(0)
         let result: (Data, HTTPURLResponse)
@@ -866,8 +883,52 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                         delegate: delegate
                     )
                 }
+            case .multipart(let form):
+                guard let multipartFileURL else {
+                    throw NetworkError.fileOperationFailed(
+                        FileTransferError.sourceDoesNotExist(URL(fileURLWithPath: ""))
+                    )
+                }
+                result = try await performDataRequest(
+                    urlRequest,
+                    acceptedStatusCodes: acceptedStatusCodes,
+                    retryPolicy: retryPolicy,
+                    beforeRetry: {
+                        try await self.fileIOExecutor.run {
+                            try form.validateSources()
+                        }
+                    },
+                    telemetry: telemetry
+                ) {
+                    let attempt = attemptState.withCriticalRegion { value in
+                        value += 1
+                        return value
+                    }
+                    progress?(TransferProgress(
+                        operation: .upload,
+                        phase: .started,
+                        bytesCompleted: 0,
+                        totalBytes: totalBytes,
+                        attempt: attempt
+                    ))
+                    let delegate = progress.map {
+                        TransferProgressDelegate(
+                            operation: .upload,
+                            attempt: attempt,
+                            handler: $0
+                        )
+                    }
+                    return try await self.urlSession.upload(
+                        for: urlRequest,
+                        fromFile: multipartFileURL,
+                        delegate: delegate
+                    )
+                }
             }
         } catch {
+            if let multipartFileURL {
+                await discardUploadedFile(at: multipartFileURL)
+            }
             progress?(TransferProgress(
                 operation: .upload,
                 phase: Task.isCancelled || error is CancellationError
@@ -878,6 +939,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 attempt: max(1, attemptState.withCriticalRegion { $0 })
             ))
             throw error
+        }
+
+        if let multipartFileURL {
+            await discardUploadedFile(at: multipartFileURL)
         }
 
         progress?(TransferProgress(
@@ -1601,6 +1666,35 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
     private func discardDownloadedFile(at url: URL) async {
         await fileIOExecutor.runCleanup {
             try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func discardUploadedFile(at url: URL) async {
+        await fileIOExecutor.runCleanup {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func prepareMultipartUpload(
+        _ form: StreamingMultipartFormData
+    ) async throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "AnotherFuckingNetworkingSDK-Multipart",
+                isDirectory: true
+            )
+        let url = directory.appendingPathComponent(
+            UUID().uuidString,
+            isDirectory: false
+        )
+        do {
+            try await fileIOExecutor.runCommitted {
+                try form.write(to: url)
+            }
+            return url
+        } catch {
+            await discardUploadedFile(at: url)
+            throw error
         }
     }
 

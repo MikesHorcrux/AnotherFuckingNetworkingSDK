@@ -7,6 +7,9 @@ public enum UploadBody: Equatable, Sendable {
 
     /// Uploads a file without first loading it into memory.
     case file(URL)
+
+    /// Streams a bounded multipart envelope from memory and file-backed parts.
+    case multipart(StreamingMultipartFormData)
 }
 
 /// The direction of a file transfer progress event.
