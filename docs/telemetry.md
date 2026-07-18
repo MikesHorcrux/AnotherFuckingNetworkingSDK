@@ -13,6 +13,7 @@ sequenceDiagram
     Caller->>Client: send / upload / download / stream
     Client->>Sink: started(operationID)
     Client->>Sink: attemptStarted(attempt)
+    Client->>Sink: taskMetrics(snapshot) when delegate metrics exist
     Client->>Sink: attemptCompleted or attemptFailed
     Client->>Sink: succeeded / failed / cancelled(duration)
     Client-->>Caller: typed result, stream, or error
@@ -49,11 +50,11 @@ outside the SDK target so applications choose their exporter and sampling
 policy.
 
 `NetworkTaskMetricsSnapshot` is the stable event field for platform task
-metrics. It is optional because Foundation does not expose identical metrics
-for every async URLSession API and supported OS release. A platform adapter can
-populate it from `NetworkTaskMetricsSnapshot(urlSessionMetrics)` when delegate
-metrics are available; absence is not a failure. The adapter retains timing
-values only and never retains URL, host, headers, or payload data.
+metrics. Transfer delegates emit a separate `taskMetrics` event whenever
+Foundation calls `didFinishCollecting`, even when progress callbacks are not
+installed. It is optional because Foundation does not expose identical metrics
+for every async URLSession API and supported OS release. The adapter retains
+timing values only and never retains URL, host, headers, or payload data.
 
 ## Performance and privacy
 

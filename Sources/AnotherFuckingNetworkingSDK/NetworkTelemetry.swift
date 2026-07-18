@@ -6,6 +6,7 @@ public enum NetworkTelemetryPhase: String, Equatable, Sendable {
     case attemptStarted
     case attemptCompleted
     case attemptFailed
+    case taskMetrics
     case succeeded
     case failed
     case cancelled

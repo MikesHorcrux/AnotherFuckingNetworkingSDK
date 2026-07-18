@@ -58,8 +58,9 @@ source and tests before relying on any example below.
   cookies, bodies, or sensitive URLs by default.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
   `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters
-  lightweight and vendor-neutral. Map Foundation delegate metrics through the
-  snapshot initializer without retaining URL or payload data.
+  lightweight and vendor-neutral. Transfer delegates emit separate
+  `taskMetrics` events through the snapshot initializer without retaining URL
+  or payload data, even when progress callbacks are disabled.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
 - Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and

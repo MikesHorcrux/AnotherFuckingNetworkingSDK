@@ -19,6 +19,7 @@ roadmap item is not a shipped feature.
   progress, resume-data extraction, and relaunch completion callbacks.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
+- Transfer delegate task-metrics telemetry with privacy-safe snapshots.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
 - Opt-in WebSocket reconnect, bounded backoff, heartbeat, and session-restorer
@@ -32,9 +33,9 @@ roadmap item is not a shipped feature.
 1. **Platform background/resumable integration** — device/relaunch coverage,
    resume-data validation, and coordinator routing for the shipped
    `BackgroundURLSessionAdapter` on each supported Apple platform.
-2. **Platform task-metrics integration** — wire the shipped
-   `NetworkTaskMetricsSnapshot(URLSessionTaskMetrics)` adapter into each
-   delegate-backed operation where the platform exposes metrics.
+2. **Platform task-metrics integration** — wire the shipped snapshot into any
+   remaining platform delegate operations and oldest-target coverage where the
+   platform exposes metrics.
 3. **Streaming multipart integration** — broader upload retry, signing, and
    oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery

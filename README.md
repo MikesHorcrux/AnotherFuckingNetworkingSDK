@@ -834,6 +834,9 @@ let client = APIClient(
 )
 ```
 
+Transfer delegates also emit privacy-safe `taskMetrics` events when Foundation
+provides `URLSessionTaskMetrics`, even without progress callbacks.
+
 `NetworkTelemetryExporter` provides a vendor-neutral bridge for OpenTelemetry
 or another metrics system. Keep exporters lightweight and enqueue work to an
 actor; delivery is synchronous and the default client has no telemetry cost.
