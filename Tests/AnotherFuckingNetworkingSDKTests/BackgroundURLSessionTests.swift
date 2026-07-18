@@ -51,4 +51,34 @@ struct BackgroundURLSessionTests {
 
         #expect(completionCount.withLock { $0 } == 1)
     }
+
+    @Test("Background delegate drops oversized resume data")
+    func oversizedResumeDataIsDropped() {
+        let events = LockedBox<[BackgroundTransferEvent]>([])
+        let delegate = BackgroundURLSessionDelegate { event in
+            events.withLock { $0.append(event) }
+        }
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.downloadTask(
+            with: URL(string: "https://example.com/file")!
+        )
+        let error = NSError(
+            domain: "com.example.transfer",
+            code: 1,
+            userInfo: [
+                NSURLSessionDownloadTaskResumeData:
+                    Data(repeating: 0, count: 8 * 1_024 * 1_024 + 1)
+            ]
+        )
+
+        delegate.urlSession(session, task: task, didCompleteWithError: error)
+
+        guard case .completed(_, let errorDescription, let resumeData)? =
+            events.withLock({ $0.first }) else {
+            Issue.record("Expected a completion event")
+            return
+        }
+        #expect(errorDescription == "com.example.transfer (1)")
+        #expect(resumeData == nil)
+    }
 }

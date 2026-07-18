@@ -105,7 +105,7 @@ public final class BackgroundURLSessionDelegate: NSObject,
             NSURLSessionDownloadTaskResumeData
         ] as? Data
         let resumeData = candidateResumeData.flatMap {
-            $0.count <= 8 * 1_024 * 1_024 ? $0 : nil
+            $0.count <= transferResumeDataLimitBytes ? $0 : nil
         }
         let description: String?
         if let error {
