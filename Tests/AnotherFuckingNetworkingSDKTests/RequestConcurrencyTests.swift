@@ -15,6 +15,18 @@ struct RequestConcurrencyTests {
         } catch {
             Issue.record("Expected limiter error, got \(error)")
         }
+
+        do {
+            _ = try RequestConcurrencyLimiter(
+                maximumConcurrentRequests: 1,
+                maximumQueuedRequests: 0
+            )
+            Issue.record("Expected invalid queue maximum")
+        } catch let error as RequestConcurrencyLimiterError {
+            #expect(error == .invalidMaximumQueuedRequests(0))
+        } catch {
+            Issue.record("Expected queue limiter error, got \(error)")
+        }
     }
 
     @Test("Permits are bounded and queued work resumes in FIFO order")
@@ -85,6 +97,44 @@ struct RequestConcurrencyTests {
 
         await releaseFirst.signal()
         try await first.value
+        #expect(await limiter.activeRequestCount == 0)
+    }
+
+    @Test("A bounded queue rejects excess waiting work")
+    func queueLimit() async throws {
+        let limiter = try RequestConcurrencyLimiter(
+            maximumConcurrentRequests: 1,
+            maximumQueuedRequests: 1
+        )
+        let firstStarted = AsyncSignal()
+        let releaseFirst = AsyncSignal()
+
+        let first = Task {
+            try await limiter.withPermit {
+                await firstStarted.signal()
+                _ = await releaseFirst.wait()
+            }
+        }
+        #expect(await firstStarted.wait())
+
+        let queued = Task {
+            try await limiter.withPermit { () }
+        }
+        for _ in 0..<100 {
+            if await limiter.waitingRequestCount == 1 { break }
+            await Task.yield()
+        }
+
+        do {
+            _ = try await limiter.withPermit { () }
+            Issue.record("Expected a full queue")
+        } catch let error as RequestConcurrencyLimiterError {
+            #expect(error == .queueFull(maximumQueuedRequests: 1))
+        }
+
+        await releaseFirst.signal()
+        try await first.value
+        try await queued.value
         #expect(await limiter.activeRequestCount == 0)
     }
 

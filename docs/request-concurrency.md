@@ -3,10 +3,16 @@
 `RequestConcurrencyLimiter` provides a small actor-isolated policy for
 protecting an API or service from an unbounded burst of concurrent response
 requests. It grants permits in FIFO order, removes cancelled waiters, and
-releases a permit whether the operation succeeds, fails, or is cancelled.
+releases a permit whether the operation succeeds, fails, or is cancelled. The
+waiting queue is bounded (128 entries by default), so overload fails with
+`RequestConcurrencyLimiterError.queueFull` instead of retaining unbounded
+caller state.
 
 ```swift
-let limiter = try RequestConcurrencyLimiter(maximumConcurrentRequests: 4)
+let limiter = try RequestConcurrencyLimiter(
+    maximumConcurrentRequests: 4,
+    maximumQueuedRequests: 128
+)
 let limitedClient = ConcurrencyLimitedAPIClient(
     client: client,
     limiter: limiter
@@ -58,4 +64,3 @@ sequenceDiagram
     Client-->>Caller: value or error
     Caller->>Limiter: release (defer)
 ```
-

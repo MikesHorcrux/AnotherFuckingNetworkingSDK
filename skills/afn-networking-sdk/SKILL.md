@@ -90,7 +90,7 @@ source and tests before relying on any example below.
   sharing that never retains completed responses.
 - Request concurrency: `RequestConcurrencyLimiter` and
   `ConcurrencyLimitedAPIClient`; actor-isolated FIFO permits with cancellation
-  aware waiters. The response decorator covers complete response operations,
+  aware waiters and a bounded waiting queue. The response decorator covers complete response operations,
   including retries and decoding, but deliberately does not pretend to bound
   stream/file lifetimes.
 - Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and

@@ -3,11 +3,17 @@ import Foundation
 /// Errors raised while configuring a request concurrency limiter.
 public enum RequestConcurrencyLimiterError: LocalizedError, Equatable, Sendable {
     case invalidMaximumRequests(Int)
+    case invalidMaximumQueuedRequests(Int)
+    case queueFull(maximumQueuedRequests: Int)
 
     public var errorDescription: String? {
         switch self {
         case .invalidMaximumRequests(let value):
             return "The maximum concurrent request count must be positive, not \(value)."
+        case .invalidMaximumQueuedRequests(let value):
+            return "The maximum queued request count must be positive, not \(value)."
+        case .queueFull(let maximumQueuedRequests):
+            return "The request concurrency queue is full at \(maximumQueuedRequests) waiting requests."
         }
     }
 }
@@ -18,23 +24,35 @@ public enum RequestConcurrencyLimiterError: LocalizedError, Equatable, Sendable 
 /// before a permit is granted. The limiter does not retry, reorder, or cancel
 /// the operation supplied by the caller.
 public actor RequestConcurrencyLimiter: Sendable {
+    public static let defaultMaximumQueuedRequests = 128
+
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<Void, any Error>
     }
 
     public let maximumConcurrentRequests: Int
+    public let maximumQueuedRequests: Int
 
     private var activeRequests = 0
     private var waiters: [Waiter] = []
 
-    public init(maximumConcurrentRequests: Int) throws {
+    public init(
+        maximumConcurrentRequests: Int,
+        maximumQueuedRequests: Int = RequestConcurrencyLimiter.defaultMaximumQueuedRequests
+    ) throws {
         guard maximumConcurrentRequests > 0 else {
             throw RequestConcurrencyLimiterError.invalidMaximumRequests(
                 maximumConcurrentRequests
             )
         }
+        guard maximumQueuedRequests > 0 else {
+            throw RequestConcurrencyLimiterError.invalidMaximumQueuedRequests(
+                maximumQueuedRequests
+            )
+        }
         self.maximumConcurrentRequests = maximumConcurrentRequests
+        self.maximumQueuedRequests = maximumQueuedRequests
     }
 
     /// Runs one operation while holding a request permit.
@@ -60,6 +78,12 @@ public actor RequestConcurrencyLimiter: Sendable {
         if activeRequests < maximumConcurrentRequests {
             activeRequests += 1
             return
+        }
+
+        guard waiters.count < maximumQueuedRequests else {
+            throw RequestConcurrencyLimiterError.queueFull(
+                maximumQueuedRequests: maximumQueuedRequests
+            )
         }
 
         let waiterID = UUID()
