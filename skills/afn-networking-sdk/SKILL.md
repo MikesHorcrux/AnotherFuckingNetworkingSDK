@@ -42,7 +42,9 @@ source and tests before relying on any example below.
 - Auth: `HTTPAuthenticator`, `SingleFlightTokenProvider`,
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
-  `StreamingMultipartFormData`, `DownloadDestination`, durable file ownership.
+  `StreamingMultipartFormData`, `DownloadDestination`, durable file ownership;
+  known file/multipart lengths are exposed through `Content-Length` before
+  `customize(_:)` for body-free signing.
 - Background transfer state: `TransferJob`, `TransferJobStore`,
   `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
   resolution, authentication, destination commits, and relaunch routing in
