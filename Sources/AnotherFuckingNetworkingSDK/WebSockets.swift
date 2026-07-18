@@ -1139,14 +1139,12 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
         stateBroadcaster.stream()
     }
 
-#if DEBUG
     /// Test-only synchronization for asserting that a public receiver has
     /// installed its waiter before a manually controlled adapter callback.
-    /// This remains unavailable from release builds and is not API surface.
+    /// This is internal test infrastructure and is not API surface.
     var hasPendingReceiveForTesting: Bool {
         lifecycle.withCriticalRegion { $0.receiveWaiter != nil }
     }
-#endif
 
     func cancel() {
         let taskClose = adapter.closeDetails()
