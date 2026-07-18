@@ -22,6 +22,121 @@ public enum RequestPathEncoding: Sendable {
     case percentEncoded
 }
 
+/// Defines which HTTP response status codes a request accepts as successful.
+///
+/// Status acceptance is independent of response-body decoding. For example,
+/// accepting `204` or `304` does not by itself allow an empty response body.
+public struct HTTPStatusPolicy: Equatable, Sendable {
+    /// Accepts the standard successful range, `200...299`.
+    public static let successful = Self(storage: .successful)
+
+    /// Accepts every status code.
+    public static let all = Self(storage: .all)
+
+    /// Rejects every status code.
+    public static let none = Self(storage: .ranges([]))
+
+    private enum Storage: Equatable, Sendable {
+        case successful
+        case all
+        case ranges([ClosedRange<Int>])
+    }
+
+    private let storage: Storage
+
+    /// Creates a policy from inclusive status-code ranges.
+    ///
+    /// Overlapping and adjacent ranges are normalized once during creation.
+    /// Supplying no ranges creates ``none``.
+    public init(_ acceptedRanges: ClosedRange<Int>...) {
+        self.init(ranges: acceptedRanges)
+    }
+
+    /// Creates a policy from a collection of inclusive status-code ranges.
+    public init(ranges acceptedRanges: [ClosedRange<Int>]) {
+        storage = Self.normalizedStorage(for: acceptedRanges)
+    }
+
+    /// Creates a policy that accepts only the supplied exact status codes.
+    public static func codes(_ acceptedStatusCodes: Set<Int>) -> Self {
+        Self(ranges: acceptedStatusCodes.map { $0...$0 })
+    }
+
+    /// Returns whether this policy accepts `statusCode`.
+    public func accepts(_ statusCode: Int) -> Bool {
+        switch storage {
+        case .successful:
+            return (200...299).contains(statusCode)
+        case .all:
+            return true
+        case .ranges(let ranges):
+            var lowerBound = 0
+            var upperBound = ranges.count
+
+            while lowerBound < upperBound {
+                let index = lowerBound + (upperBound - lowerBound) / 2
+                let range = ranges[index]
+                if statusCode < range.lowerBound {
+                    upperBound = index
+                } else if statusCode > range.upperBound {
+                    lowerBound = index + 1
+                } else {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    private init(storage: Storage) {
+        self.storage = storage
+    }
+
+    private static func normalizedStorage(
+        for acceptedRanges: [ClosedRange<Int>]
+    ) -> Storage {
+        guard !acceptedRanges.isEmpty else { return .ranges([]) }
+
+        let sortedRanges = acceptedRanges.sorted {
+            if $0.lowerBound == $1.lowerBound {
+                return $0.upperBound < $1.upperBound
+            }
+            return $0.lowerBound < $1.lowerBound
+        }
+        var normalized: [ClosedRange<Int>] = []
+        normalized.reserveCapacity(sortedRanges.count)
+
+        for range in sortedRanges {
+            guard let previous = normalized.last else {
+                normalized.append(range)
+                continue
+            }
+
+            let overlaps = range.lowerBound <= previous.upperBound
+            let isAdjacent = previous.upperBound < Int.max
+                && range.lowerBound == previous.upperBound + 1
+            if overlaps || isAdjacent {
+                let mergedUpperBound = max(
+                    previous.upperBound,
+                    range.upperBound
+                )
+                normalized[normalized.count - 1] =
+                    previous.lowerBound...mergedUpperBound
+            } else {
+                normalized.append(range)
+            }
+        }
+
+        if normalized == [Int.min...Int.max] {
+            return .all
+        }
+        if normalized == [200...299] {
+            return .successful
+        }
+        return .ranges(normalized)
+    }
+}
+
 // MARK: - NetworkError
 
 /// An error produced while constructing, sending, or decoding a network request.
@@ -89,6 +204,10 @@ public protocol HTTPRequest: Sendable {
     /// case-insensitively.
     var headers: [String: String]? { get }
 
+    /// The response status codes accepted by this request. The default is
+    /// ``HTTPStatusPolicy/successful``.
+    var acceptedStatusCodes: HTTPStatusPolicy { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -109,6 +228,7 @@ public extension HTTPRequest {
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
+    var acceptedStatusCodes: HTTPStatusPolicy { .successful }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {

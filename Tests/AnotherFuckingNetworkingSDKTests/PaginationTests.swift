@@ -149,6 +149,27 @@ struct PaginationTests {
         #expect(response.statusCode == 206)
         #expect(response.value(forHTTPHeaderField: "x-page-source") == "fixture")
     }
+
+    @Test("Pagination forwards request-specific status policies")
+    func statusPolicyForwarding() async throws {
+        let body = Data(#"{"items":[{"id":9,"displayName":"Conflict"}],"currentPage":1,"totalPages":1}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: body
+            ))
+        }
+
+        let response = try await stub.client().sendPageResponse(
+            StatusPolicyPageRequest()
+        )
+
+        #expect(response.statusCode == 409)
+        #expect(response.value.items == [
+            TestUser(id: 9, displayName: "Conflict")
+        ])
+    }
 }
 
 private struct UserPageRequest: PaginatedRequest {
@@ -265,6 +286,15 @@ private struct CustomizedPageRequest: PaginatedRequest {
     }
 }
 
+private struct StatusPolicyPageRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    let page = 1
+    let pageSize = 20
+    let path = "status-policy-page"
+    let acceptedStatusCodes = HTTPStatusPolicy.codes([409])
+}
+
 /// Calls the protocol's default URL builder from a custom implementation.
 private enum RequestURLBuilder {
     private struct Wrapped<R: Request>: Request {
@@ -276,6 +306,9 @@ private enum RequestURLBuilder {
         var queryItems: [URLQueryItem]? { request.queryItems }
         var body: Data? { request.body }
         var headers: [String: String]? { request.headers }
+        var acceptedStatusCodes: HTTPStatusPolicy {
+            request.acceptedStatusCodes
+        }
         var allowsEmptyResponseBody: Bool { request.allowsEmptyResponseBody }
 
         func makeBody(using encoder: JSONEncoder) throws -> Data? {

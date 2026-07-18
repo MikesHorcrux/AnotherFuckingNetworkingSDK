@@ -138,6 +138,63 @@ struct FileTransferTests {
         }
     }
 
+    @Test("Status policies apply to data and file upload responses")
+    func uploadStatusPolicies() async throws {
+        let responseBody = Data(#"{"id":9,"displayName":"Conflict"}"#.utf8)
+        let acceptedStub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: responseBody
+            ))
+        }
+        let request = StatusUploadFixtureRequest(
+            acceptedStatusCodes: .codes([409])
+        )
+
+        let dataResponse = try await acceptedStub.client().upload(
+            request,
+            from: .data(Data("payload".utf8))
+        )
+
+        let sourceURL = uniqueTemporaryURL()
+        try Data("file-payload".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let fileResponse = try await acceptedStub.client().upload(
+            request,
+            from: .file(sourceURL)
+        )
+
+        #expect(dataResponse.statusCode == 409)
+        #expect(fileResponse.statusCode == 409)
+        #expect(dataResponse.value == TestUser(id: 9, displayName: "Conflict"))
+        #expect(fileResponse.value == dataResponse.value)
+
+        let rejectedStub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 299,
+                data: responseBody
+            ))
+        }
+        do {
+            _ = try await rejectedStub.client().upload(
+                StatusUploadFixtureRequest(
+                    acceptedStatusCodes: .codes([201])
+                ),
+                from: .data(Data("payload".utf8))
+            )
+            Issue.record("Expected the upload status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 299)
+            #expect(failure.data == responseBody)
+        }
+    }
+
     @Test("Upload cancellation remains CancellationError")
     func uploadCancellation() async throws {
         let started = AsyncSignal()
@@ -193,6 +250,65 @@ struct FileTransferTests {
         #expect(try Data(contentsOf: response.fileURL) == payload)
         #expect(response.statusCode == 206)
         #expect(response.value(forHTTPHeaderField: "etag") == "fixture-tag")
+    }
+
+    @Test("Download status policies accept custom statuses")
+    func acceptedDownloadStatusPolicy() async throws {
+        let payload = Data("conflict-export".utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: payload
+            ))
+        }
+
+        let response = try await stub.client().download(
+            StatusDownloadFixtureRequest(
+                acceptedStatusCodes: .codes([409])
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: response.fileURL) }
+
+        #expect(response.statusCode == 409)
+        #expect(try Data(contentsOf: response.fileURL) == payload)
+    }
+
+    @Test("Rejected download statuses discard the owned temporary file")
+    func rejectedDownloadStatusPolicy() async throws {
+        let errorBody = Data("unexpected-success".utf8)
+        let ownedDownloadURL = uniqueTemporaryURL()
+        try errorBody.write(to: ownedDownloadURL)
+        defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
+        let stub = StubSession { _ in
+            .pending(onStart: {}, onStop: {})
+        }
+        let client = stub.client(downloadOperation: { request in
+            (
+                ownedDownloadURL,
+                try StubURLProtocol.StubResponse.http(
+                    for: request,
+                    statusCode: 206,
+                    data: errorBody
+                ).response
+            )
+        })
+
+        do {
+            _ = try await client.download(StatusDownloadFixtureRequest(
+                acceptedStatusCodes: .codes([200])
+            ))
+            Issue.record("Expected the download status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 206)
+            #expect(failure.data == errorBody)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
     }
 
     @Test("Downloads move to an explicit destination")
@@ -522,6 +638,14 @@ private struct FileUploadFixtureRequest: Request {
     let method = HTTPMethod.put
 }
 
+private struct StatusUploadFixtureRequest: Request {
+    typealias ReturnType = TestUser
+
+    let acceptedStatusCodes: HTTPStatusPolicy
+    let path = "uploads/status-policy"
+    let method = HTTPMethod.post
+}
+
 private struct DownloadFixtureRequest: DownloadRequest {
     let path = "downloads/file"
     let method = HTTPMethod.post
@@ -530,6 +654,11 @@ private struct DownloadFixtureRequest: DownloadRequest {
     func customize(_ urlRequest: inout URLRequest) throws {
         urlRequest.timeoutInterval = 30
     }
+}
+
+private struct StatusDownloadFixtureRequest: DownloadRequest {
+    let acceptedStatusCodes: HTTPStatusPolicy
+    let path = "downloads/status-policy"
 }
 
 private enum FileTransferFixtureError: Error {

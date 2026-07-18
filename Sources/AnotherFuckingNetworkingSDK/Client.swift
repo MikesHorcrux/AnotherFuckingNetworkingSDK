@@ -264,12 +264,16 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         _ request: R
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
         )
-        let (data, httpResponse) = try await performDataRequest(urlRequest) {
+        let (data, httpResponse) = try await performDataRequest(
+            urlRequest,
+            acceptedStatusCodes: acceptedStatusCodes
+        ) {
             try await self.urlSession.data(for: urlRequest)
         }
         return try Self.makeResponse(
@@ -313,6 +317,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         from body: UploadBody
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let configuration = state.withCriticalRegion { $0 }
 
         let bodySource: RequestBodySource
@@ -335,11 +340,17 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         let result: (Data, HTTPURLResponse)
         switch body {
         case .data(let data):
-            result = try await performDataRequest(urlRequest) {
+            result = try await performDataRequest(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes
+            ) {
                 try await self.urlSession.upload(for: urlRequest, from: data)
             }
         case .file(let fileURL):
-            result = try await performDataRequest(urlRequest) {
+            result = try await performDataRequest(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes
+            ) {
                 try await self.urlSession.upload(for: urlRequest, fromFile: fileURL)
             }
         }
@@ -374,6 +385,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         try await fileIOExecutor.run {
             try Self.validateDownloadDestination(destination)
         }
@@ -402,7 +414,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
                 throw NetworkError.invalidResponse
             }
 
-            guard (200..<300).contains(httpResponse.statusCode) else {
+            guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
                 let errorData = try await fileIOExecutor.run {
                     Self.readDownloadErrorData(at: temporaryURL)
                 }
@@ -499,6 +511,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
 
     private func performDataRequest(
         _ urlRequest: URLRequest,
+        acceptedStatusCodes: HTTPStatusPolicy,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
@@ -519,7 +532,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NetworkError.invalidResponse
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
             throw NetworkError.requestFailed(Self.makeHTTPFailure(
                 response: httpResponse,
                 data: data
@@ -751,6 +764,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     var headers: [String: String]? { wrapped.headers }
     var body: Data? { wrapped.body }
     var queryItems: [URLQueryItem]? { wrapped.queryItems }
+    var acceptedStatusCodes: HTTPStatusPolicy { wrapped.acceptedStatusCodes }
     var allowsEmptyResponseBody: Bool { wrapped.allowsEmptyResponseBody }
 
     func makeURL(baseURL: URL) -> URL? {

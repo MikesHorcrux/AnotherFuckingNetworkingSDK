@@ -11,6 +11,47 @@ struct PublicAPISurfaceTests {
         ])
     }
 
+    @Test("HTTP status policies are normalized immutable values")
+    func httpStatusPolicies() {
+        let custom = HTTPStatusPolicy(
+            304...304,
+            200...249,
+            250...299,
+            409...409
+        )
+        let normalized = HTTPStatusPolicy(ranges: [
+            200...299,
+            304...304,
+            409...409
+        ])
+        let exact = HTTPStatusPolicy.codes([201, 204, 304])
+
+        requireSendable(custom)
+        #expect(custom == normalized)
+        #expect(custom.accepts(200))
+        #expect(custom.accepts(299))
+        #expect(custom.accepts(304))
+        #expect(custom.accepts(409))
+        #expect(!custom.accepts(199))
+        #expect(!custom.accepts(300))
+        #expect(!custom.accepts(410))
+
+        #expect(HTTPStatusPolicy.successful.accepts(200))
+        #expect(HTTPStatusPolicy.successful.accepts(299))
+        #expect(!HTTPStatusPolicy.successful.accepts(199))
+        #expect(!HTTPStatusPolicy.successful.accepts(300))
+        #expect(HTTPStatusPolicy.all.accepts(Int.min))
+        #expect(HTTPStatusPolicy.all.accepts(Int.max))
+        #expect(!HTTPStatusPolicy.none.accepts(200))
+        #expect(exact.accepts(201))
+        #expect(exact.accepts(204))
+        #expect(exact.accepts(304))
+        #expect(!exact.accepts(202))
+        #expect(HTTPStatusPolicy(200...299) == .successful)
+        #expect(HTTPStatusPolicy(Int.min...Int.max) == .all)
+        #expect(HTTPStatusPolicy() == .none)
+    }
+
     @Test("Every network error has a useful localized description")
     func localizedErrors() {
         let underlying = NSError(
