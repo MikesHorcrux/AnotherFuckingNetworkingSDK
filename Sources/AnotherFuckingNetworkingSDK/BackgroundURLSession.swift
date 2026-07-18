@@ -21,6 +21,10 @@ public enum BackgroundTransferEvent: Equatable, Sendable {
         errorDescription: String?,
         resumeData: Data?
     )
+    case metrics(
+        taskIdentifier: Int,
+        snapshot: NetworkTaskMetricsSnapshot
+    )
     case backgroundEventsFinished
 }
 
@@ -113,6 +117,17 @@ public final class BackgroundURLSessionDelegate: NSObject,
             taskIdentifier: task.taskIdentifier,
             errorDescription: description,
             resumeData: resumeData
+        ))
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        eventHandler(.metrics(
+            taskIdentifier: task.taskIdentifier,
+            snapshot: NetworkTaskMetricsSnapshot(metrics)
         ))
     }
 
