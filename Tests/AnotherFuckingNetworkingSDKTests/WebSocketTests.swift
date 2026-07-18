@@ -509,7 +509,7 @@ struct URLSessionWebSocketTransportTests {
 
         #expect(try await transport.open() == "chat.v2")
         #expect(adapter.snapshot.resumeCount == 1)
-        guard case .open = await transport.status() else {
+        guard case .open = transport.status() else {
             Issue.record("Expected an open transport")
             return
         }
@@ -531,7 +531,7 @@ struct URLSessionWebSocketTransportTests {
         )
         adapter.emit(.closed(peerClose))
 
-        guard case .closed(let close) = await transport.status() else {
+        guard case .closed(let close) = transport.status() else {
             Issue.record("Expected a closed transport")
             return
         }
@@ -558,7 +558,7 @@ struct URLSessionWebSocketTransportTests {
         }
         #expect(close == peerClose)
 
-        guard case .closed(let statusClose) = await transport.status() else {
+        guard case .closed(let statusClose) = transport.status() else {
             Issue.record("Expected a closed transport")
             return
         }
@@ -582,7 +582,7 @@ struct URLSessionWebSocketTransportTests {
             Issue.record("Expected URLError, got \(error)")
         }
 
-        guard case .closed(nil) = await transport.status() else {
+        guard case .closed(nil) = transport.status() else {
             Issue.record("Expected a closed transport without peer details")
             return
         }
@@ -638,7 +638,7 @@ struct URLSessionWebSocketTransportTests {
         #expect(adapter.snapshot.cancelCount == 1)
 
         adapter.emit(.opened(negotiatedSubprotocol: "late"))
-        guard case .closed(nil) = await transport.status() else {
+        guard case .closed(nil) = transport.status() else {
             Issue.record("Expected cancellation to leave the transport closed")
             return
         }
@@ -659,7 +659,7 @@ struct URLSessionWebSocketTransportTests {
         try await transport.send(.text("hello"))
         #expect(try await transport.receive() == .binary(payload))
         try await transport.ping()
-        await transport.close(
+        transport.close(
             code: .normalClosure,
             reason: Data("finished".utf8)
         )
@@ -692,10 +692,11 @@ struct URLSessionWebSocketTransportTests {
             Issue.record("Expected URLError, got \(error)")
         }
 
-        guard case .closed(nil) = await transport.status() else {
+        guard case .closed(nil) = transport.status() else {
             Issue.record("Expected a failed operation to close the transport")
             return
         }
+        #expect(adapter.snapshot.cancelCount == 1)
     }
 
     @Test("Cancelling a pending operation cancels its task adapter")
@@ -719,7 +720,7 @@ struct URLSessionWebSocketTransportTests {
         #expect(adapter.snapshot.cancelCount == 1)
 
         adapter.completeReceive(.success(.text("late")))
-        guard case .closed(nil) = await transport.status() else {
+        guard case .closed(nil) = transport.status() else {
             Issue.record("Expected cancellation to close the transport")
             return
         }
@@ -1516,7 +1517,7 @@ private final class FakeWebSocketTransport: WebSocketTransport,
         try result.get()
     }
 
-    func close(code: WebSocketCloseCode, reason: Data?) async {
+    func close(code: WebSocketCloseCode, reason: Data?) {
         state.withLock {
             $0.closes.append(CloseRecord(code: code, reason: reason))
         }
@@ -1526,7 +1527,7 @@ private final class FakeWebSocketTransport: WebSocketTransport,
         state.withLock { $0.cancelCount += 1 }
     }
 
-    func status() async -> WebSocketTransportStatus {
+    func status() -> WebSocketTransportStatus {
         state.withLock { $0.status }
     }
 

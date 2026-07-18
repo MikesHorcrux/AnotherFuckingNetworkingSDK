@@ -611,10 +611,13 @@ size. Factories are recommended when every connect should receive an independent
 connection.
 
 The connection mock consumes incoming messages, send results, and ping results
-in FIFO order. Pending receivers can be completed with `enqueueIncoming`,
-`finish`, or `fail`; cancellation removes only the cancelled waiter. Its unified
+in FIFO order. It mirrors production's single-active-receive rule and treats an
+operation failure or cancellation as connection-scoped. A pending receiver can
+be completed with `enqueueIncoming`, `finish`, or `fail`. Its unified
 `recordedOperations` sequence preserves the order of sends, receives, pings, and
-closes without wall-clock sleeps or live networking.
+closes without wall-clock sleeps or live networking. Request and operation
+sequence IDs remain monotonic for each mock's lifetime, including across clear
+and reset calls.
 
 ## 1.x to 2.x migration
 

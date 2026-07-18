@@ -664,9 +664,9 @@ protocol WebSocketTransport: Sendable {
     func send(_ message: WebSocketMessage) async throws
     func receive() async throws -> WebSocketMessage
     func ping() async throws
-    func close(code: WebSocketCloseCode, reason: Data?) async
+    func close(code: WebSocketCloseCode, reason: Data?)
     func cancel()
-    func status() async -> WebSocketTransportStatus
+    func status() -> WebSocketTransportStatus
 }
 
 final class URLSessionWebSocketTransport: WebSocketTransport,
@@ -748,11 +748,11 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
         }
     }
 
-    func close(code: WebSocketCloseCode, reason: Data?) async {
+    func close(code: WebSocketCloseCode, reason: Data?) {
         adapter.close(code: code, reason: reason)
     }
 
-    func status() async -> WebSocketTransportStatus {
+    func status() -> WebSocketTransportStatus {
         let taskClose = adapter.closeDetails()
         return lifecycle.withLock { state -> WebSocketTransportStatus in
             if let taskClose {
@@ -854,11 +854,19 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
 
     private func markCompleted() {
         let taskClose = adapter.closeDetails()
-        lifecycle.withLock { state in
+        let shouldCancel = lifecycle.withLock { state in
             state.isCompleted = true
             if let taskClose {
                 state.close = taskClose
             }
+            guard taskClose == nil, !state.cancelRequested else {
+                return false
+            }
+            state.cancelRequested = true
+            return true
+        }
+        if shouldCancel {
+            adapter.cancel()
         }
     }
 }
@@ -885,7 +893,7 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
 
     public var state: WebSocketConnectionState {
         get async {
-            await resolvedState()
+            resolvedState()
         }
     }
 
@@ -944,17 +952,17 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
             )
         }
 
-        switch await resolvedState() {
+        switch resolvedState() {
         case .open:
             currentState = .closing
-            await transport.close(code: code, reason: reasonData)
+            transport.close(code: code, reason: reasonData)
         case .closing, .closed:
             return
         }
     }
 
     private func requireOpen() async throws {
-        switch await resolvedState() {
+        switch resolvedState() {
         case .open:
             return
         case .closing:
@@ -964,8 +972,8 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
         }
     }
 
-    private func resolvedState() async -> WebSocketConnectionState {
-        if case .closed(let close) = await transport.status() {
+    private func resolvedState() -> WebSocketConnectionState {
+        if case .closed(let close) = transport.status() {
             if case .closed(let existingClose) = currentState,
                existingClose != nil,
                close == nil {
@@ -984,7 +992,7 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
         }
 
         let close: WebSocketClose?
-        if case .closed(let value) = await transport.status() {
+        if case .closed(let value) = transport.status() {
             close = value
         } else {
             close = nil

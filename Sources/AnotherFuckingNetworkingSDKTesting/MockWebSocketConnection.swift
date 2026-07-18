@@ -29,9 +29,10 @@ public typealias MockWebSocketOperation = RecordedWebSocketOperation.Operation
 
 /// A deterministic, actor-isolated test double for a WebSocket connection.
 ///
-/// Incoming messages and pending receivers are matched in FIFO order. Send and
-/// ping results are also consumed in FIFO order, defaulting to success when no
-/// result has been queued.
+/// Incoming messages are consumed in FIFO order. Like the production
+/// connection, the mock accepts only one active receive. Send and ping results
+/// are also consumed in FIFO order, defaulting to success when no result has
+/// been queued.
 public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     public nonisolated let url: URL
     public nonisolated let negotiatedSubprotocol: String?
@@ -68,7 +69,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
 
     /// The number of receive calls currently waiting for input.
     public var pendingReceiveCount: Int {
-        receiveWaiters.count
+        receiveWaiter == nil ? 0 : 1
     }
 
     private var incomingResults: [
@@ -76,9 +77,10 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     ]
     private var sendResults: [Result<Void, any Error>] = []
     private var pingResults: [Result<Void, any Error>] = []
-    private var receiveWaiters: [ReceiveWaiter] = []
+    private var receiveWaiter: ReceiveWaiter?
     private var terminalError: (any Error)?
     private var nextSequenceID = 0
+    private var lifecycleGeneration = 0
 
     /// Creates an open mock connection.
     ///
@@ -104,11 +106,11 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     ) {
         guard isOpen else { return }
 
-        if receiveWaiters.isEmpty {
-            incomingResults.append(result)
+        if let receiveWaiter {
+            self.receiveWaiter = nil
+            receiveWaiter.continuation.resume(with: result)
         } else {
-            let waiter = receiveWaiters.removeFirst()
-            waiter.continuation.resume(with: result)
+            incomingResults.append(result)
         }
     }
 
@@ -127,7 +129,8 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         enqueueIncoming(.binary(data))
     }
 
-    /// Enqueues one non-terminal receive failure.
+    /// Enqueues one receive failure. Consuming the failure closes the
+    /// connection, matching the production transport.
     public func enqueueIncoming(error: any Error) {
         enqueueIncoming(.failure(error))
     }
@@ -145,26 +148,30 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     // MARK: Connection operations
 
     public func send(_ message: WebSocketMessage) async throws {
-        try Task.checkCancellation()
+        try cancelIfNeeded()
         try requireOpen()
 
         record(.send(message))
         let result = sendResults.isEmpty
             ? Result<Void, any Error>.success(())
             : sendResults.removeFirst()
-        _ = try resolve(result)
+        _ = try resolveOperation(result)
     }
 
     public func receive() async throws -> WebSocketMessage {
-        try Task.checkCancellation()
+        try cancelIfNeeded()
         try requireOpen()
+        guard receiveWaiter == nil else {
+            throw WebSocketError.concurrentReceive
+        }
         record(.receive)
 
         if !incomingResults.isEmpty {
-            return try resolve(incomingResults.removeFirst())
+            return try resolveOperation(incomingResults.removeFirst())
         }
 
         let waiterID = UUID()
+        let generation = lifecycleGeneration
         do {
             let message = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation {
@@ -175,10 +182,10 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
                     if Task.isCancelled {
                         continuation.resume(throwing: CancellationError())
                     } else {
-                        receiveWaiters.append(ReceiveWaiter(
+                        receiveWaiter = ReceiveWaiter(
                             id: waiterID,
                             continuation: continuation
-                        ))
+                        )
                     }
                 }
             } onCancel: {
@@ -188,28 +195,33 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
             return message
         } catch {
             if Task.isCancelled || error is CancellationError {
+                if generation == lifecycleGeneration {
+                    closeAfterOperationFailure(throwing: CancellationError())
+                }
                 throw CancellationError()
+            }
+            if generation == lifecycleGeneration {
+                closeAfterOperationFailure(throwing: error)
             }
             throw error
         }
     }
 
     public func ping() async throws {
-        try Task.checkCancellation()
+        try cancelIfNeeded()
         try requireOpen()
 
         record(.ping)
         let result = pingResults.isEmpty
             ? Result<Void, any Error>.success(())
             : pingResults.removeFirst()
-        _ = try resolve(result)
+        _ = try resolveOperation(result)
     }
 
     public func close(
         code: WebSocketCloseCode,
         reason: String?
     ) async throws {
-        try Task.checkCancellation()
         let close = try Self.validatedClose(code: code, reason: reason)
 
         guard isOpen else { return }
@@ -257,10 +269,10 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         drainReceiveWaiters(throwing: error)
     }
 
-    /// Clears only the unified operation history and restarts sequence IDs.
+    /// Clears only the unified operation history. Sequence IDs remain
+    /// monotonic for the connection's lifetime.
     public func clearRecordedOperations() {
         recordedOperations.removeAll(keepingCapacity: true)
-        nextSequenceID = 0
     }
 
     /// Returns the mock to a fresh open state.
@@ -268,6 +280,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     /// Pending receivers are cancelled before all queued results and recorded
     /// operations are cleared.
     public func reset() {
+        lifecycleGeneration += 1
         drainReceiveWaiters(throwing: CancellationError())
         clearQueuedResults()
         clearRecordedOperations()
@@ -312,35 +325,50 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         nextSequenceID += 1
     }
 
-    private func resolve<Value: Sendable>(
+    private func resolveOperation<Value: Sendable>(
         _ result: Result<Value, any Error>
     ) throws -> Value {
         do {
             let value = try result.get()
-            try Task.checkCancellation()
+            try cancelIfNeeded()
             return value
         } catch {
             if Task.isCancelled || error is CancellationError {
+                closeAfterOperationFailure(throwing: CancellationError())
                 throw CancellationError()
             }
+            closeAfterOperationFailure(throwing: error)
             throw error
         }
     }
 
+    private func cancelIfNeeded() throws {
+        guard Task.isCancelled else { return }
+        closeAfterOperationFailure(throwing: CancellationError())
+        throw CancellationError()
+    }
+
+    private func closeAfterOperationFailure(throwing error: any Error) {
+        guard isOpen else { return }
+        state = .closed(closeDetails)
+        clearQueuedResults()
+        drainReceiveWaiters(throwing: error)
+    }
+
     private func cancelReceive(_ id: UUID) {
-        guard let index = receiveWaiters.firstIndex(where: { $0.id == id }) else {
+        guard let receiveWaiter, receiveWaiter.id == id else {
             return
         }
-        let waiter = receiveWaiters.remove(at: index)
-        waiter.continuation.resume(throwing: CancellationError())
+        self.receiveWaiter = nil
+        state = .closed(closeDetails)
+        clearQueuedResults()
+        receiveWaiter.continuation.resume(throwing: CancellationError())
     }
 
     private func drainReceiveWaiters(throwing error: any Error) {
-        let waiters = receiveWaiters
-        receiveWaiters.removeAll(keepingCapacity: true)
-        for waiter in waiters {
-            waiter.continuation.resume(throwing: error)
-        }
+        guard let receiveWaiter else { return }
+        self.receiveWaiter = nil
+        receiveWaiter.continuation.resume(throwing: error)
     }
 
     private func clearQueuedResults() {

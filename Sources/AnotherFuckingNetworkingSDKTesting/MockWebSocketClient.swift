@@ -86,6 +86,7 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
     private var delayNanoseconds: UInt64
     private let sleeper: Sleeper
     private var stubs: [StubRegistration] = []
+    private var nextSequenceID = 0
 
     /// Creates a mock whose handshake construction mirrors a production
     /// client.
@@ -314,7 +315,7 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
         context: RequestContext
     ) -> RecordedWebSocketRequest {
         let invocation = RecordedWebSocketRequest(
-            sequenceID: recordedRequests.count,
+            sequenceID: nextSequenceID,
             requestTypeID: ObjectIdentifier(R.self),
             requestTypeName: String(reflecting: R.self),
             urlRequest: context.urlRequest,
@@ -330,6 +331,7 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
             subprotocols: request.subprotocols,
             maximumMessageSize: request.maximumMessageSize
         )
+        nextSequenceID += 1
         recordedRequests.append(invocation)
         return invocation
     }

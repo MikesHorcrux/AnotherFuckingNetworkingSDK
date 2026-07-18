@@ -124,7 +124,7 @@ struct MockWebSocketClientTests {
                 Issue.record("Expected missingStub, got \(error)")
                 return
             }
-            #expect(request.sequenceID == 0)
+            #expect(request.sequenceID == 1)
             #expect(request.path == "socket")
         }
     }
@@ -148,29 +148,35 @@ struct MockWebSocketClientTests {
 
 @Suite("MockWebSocketConnection")
 struct MockWebSocketConnectionTests {
-    @Test("Incoming messages and waiting receivers are FIFO")
-    func receiveFIFO() async throws {
+    @Test("Incoming messages are FIFO and concurrent receives match production")
+    func receiveFIFOAndConcurrencyParity() async throws {
         let mock = MockWebSocketConnection()
         let first = Task { try await mock.receive() }
         await expectPendingReceives(1, on: mock)
-        let second = Task { try await mock.receive() }
-        await expectPendingReceives(2, on: mock)
+
+        do {
+            _ = try await mock.receive()
+            Issue.record("Expected concurrentReceive")
+        } catch let error as WebSocketError {
+            guard case .concurrentReceive = error else {
+                Issue.record("Expected concurrentReceive, got \(error)")
+                return
+            }
+        }
 
         await mock.enqueueIncoming(text: "first")
         await mock.enqueueIncoming(data: Data([0x02]))
 
         #expect(try await first.value == .text("first"))
-        #expect(try await second.value == .binary(Data([0x02])))
+        #expect(try await mock.receive() == .binary(Data([0x02])))
         #expect(await mock.pendingReceiveCount == 0)
     }
 
-    @Test("Receive cancellation removes only its waiter")
+    @Test("Receive cancellation closes the connection")
     func receiveCancellation() async throws {
         let mock = MockWebSocketConnection()
         let cancelled = Task { try await mock.receive() }
         await expectPendingReceives(1, on: mock)
-        let remaining = Task { try await mock.receive() }
-        await expectPendingReceives(2, on: mock)
 
         cancelled.cancel()
         do {
@@ -179,36 +185,56 @@ struct MockWebSocketConnectionTests {
         } catch {
             #expect(error is CancellationError)
         }
-        await expectPendingReceives(1, on: mock)
-
-        await mock.enqueueIncoming(text: "remaining")
-        #expect(try await remaining.value == .text("remaining"))
-    }
-
-    @Test("Queued send and ping failures are consumed once")
-    func queuedOperationResults() async throws {
-        let mock = MockWebSocketConnection()
-        await mock.enqueueSendResult(.failure(MockSocketFixtureError.send))
-        await mock.enqueuePingResult(.failure(MockSocketFixtureError.ping))
+        await expectPendingReceives(0, on: mock)
+        #expect(await mock.state == .closed(nil))
 
         do {
-            try await mock.send(text: "failed")
+            _ = try await mock.receive()
+            Issue.record("Expected the cancelled connection to stay closed")
+        } catch let error as WebSocketError {
+            guard case .connectionClosed(nil) = error else {
+                Issue.record("Expected connectionClosed, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test("Queued operation failures close their connections")
+    func queuedOperationFailuresAreTerminal() async throws {
+        let sendMock = MockWebSocketConnection()
+        await sendMock.enqueueSendResult(.failure(MockSocketFixtureError.send))
+
+        do {
+            try await sendMock.send(text: "failed")
             Issue.record("Expected send failure")
         } catch let error as MockSocketFixtureError {
             #expect(error == .send)
         }
-        try await mock.send(text: "succeeds")
+        #expect(await sendMock.state == .closed(nil))
 
+        let pingMock = MockWebSocketConnection()
+        await pingMock.enqueuePingResult(.failure(MockSocketFixtureError.ping))
         do {
-            try await mock.ping()
+            try await pingMock.ping()
             Issue.record("Expected ping failure")
         } catch let error as MockSocketFixtureError {
             #expect(error == .ping)
         }
-        try await mock.ping()
+        #expect(await pingMock.state == .closed(nil))
+        #expect(await sendMock.sentMessages == [.text("failed")])
+        #expect(await pingMock.pingCount == 1)
+    }
 
-        #expect(await mock.sentMessages == [.text("failed"), .text("succeeds")])
-        #expect(await mock.pingCount == 2)
+    @Test("A cancelled task can still request a graceful close")
+    func cancelledTaskCanClose() async throws {
+        let mock = MockWebSocketConnection()
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await mock.close(code: .normalClosure, reason: nil)
+        }
+
+        try await task.value
+        #expect(await mock.state == .closing)
     }
 
     @Test("Close validates inputs, records details, and drains receivers")
