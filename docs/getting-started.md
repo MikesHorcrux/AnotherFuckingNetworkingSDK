@@ -145,6 +145,15 @@ waitsForConnectivity behavior:
         print(snapshot.status, snapshot.isExpensive)
     }
 
+On iOS 17, macOS 14, and newer Observation-capable deployments, bind the same
+monitor to `ObservableNetworkPath` for SwiftUI or other main-actor views. The
+adapter mirrors only immutable snapshots; it does not move path monitoring or
+request execution onto the main actor:
+
+    @MainActor
+    let connectivity = ObservableNetworkPath(monitor: pathMonitor)
+    connectivity.start()
+
 ## Handle cancellation
 
 `CancellationError` is preserved. Do not catch it as a generic transport
