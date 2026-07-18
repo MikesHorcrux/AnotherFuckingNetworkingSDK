@@ -268,10 +268,23 @@ for try await byte in stream {
 single-pass. Cancelling the consuming task cancels the underlying URL session
 task; call `stream.cancel()` when ownership needs to end explicitly. Once a
 successful stream has been returned, the SDK never retries a partially
-consumed response. SSE, NDJSON, and line-oriented framing can be built as
-small adapters over this byte sequence without changing the transport layer.
-Services that need this capability can depend on
-`any APIClientStreamingProtocol`.
+consumed response. For Server-Sent Events, wrap the byte stream in the bounded
+parser provided by `ServerSentEventStream`:
+
+~~~swift
+let bytes = try await client.stream(EventRequest())
+let events = ServerSentEventStream(bytes: bytes)
+for try await event in events {
+    print(event.event, event.id ?? "", event.data)
+}
+~~~
+
+The parser handles UTF-8 fields, CRLF/LF framing, multiline `data:` values,
+and bounded `retry:` metadata without accumulating the response body. NDJSON
+and other line-oriented formats can use the same byte sequence with a small
+application adapter. Services that need this capability can depend on
+`any APIClientStreamingProtocol`. See
+[Server-Sent Events](docs/server-sent-events.md) for cancellation and limits.
 
 ## Request-specific status policies
 

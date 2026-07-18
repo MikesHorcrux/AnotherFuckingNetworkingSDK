@@ -37,8 +37,9 @@ source and tests before relying on any example below.
 ## Capability map
 
 - Typed JSON/raw requests: `Request`, `RawDataRequest`, `HTTPResponse`.
-- Streaming: `APIClientStreamingProtocol`, `HTTPByteStream`; status and retry
-  decisions finish before bytes are exposed.
+- Streaming: `APIClientStreamingProtocol`, `HTTPByteStream`, and bounded
+  `ServerSentEventStream`; status and retry decisions finish before bytes are
+  exposed, while SSE framing stays in a cancellation-owned adapter.
 - Auth: `HTTPAuthenticator`, `SingleFlightTokenProvider`,
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
@@ -113,7 +114,8 @@ source and tests before relying on any example below.
 
 Build URLs and bodies through `HTTPRequest`; let Foundation's `URLSession`
 provide HTTP/2, HTTP/3, cookies, ATS, redirects, and auth challenges. Use
-`HTTPByteStream` for large or long-lived bodies. Put SSE/NDJSON framing in an
+`HTTPByteStream` for large or long-lived bodies. Use `ServerSentEventStream`
+for bounded SSE framing, and put NDJSON or product-specific framing in an
 adapter rather than the transport core. See
 [`docs/architecture.md`](../../docs/architecture.md) and
 [`docs/authentication-and-retries.md`](../../docs/authentication-and-retries.md).
