@@ -163,7 +163,9 @@ public actor JSONWebSocketRecoveryStore: WebSocketRecoveryStore {
     ) async throws {
         let data: Data
         do {
-            data = try JSONEncoder().encode(states)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(states)
         } catch {
             throw WebSocketRecoveryStoreError.encodingFailed
         }
