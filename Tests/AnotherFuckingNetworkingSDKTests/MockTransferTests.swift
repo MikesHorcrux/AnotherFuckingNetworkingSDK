@@ -252,6 +252,7 @@ struct MockTransferTests {
             uploadRequest,
             from: body
         ).value.id == 99)
+        #expect(await mock.recordedTransfers.map(\.sequenceID) == [2])
 
         await mock.setDelay(30)
         await mock.reset()
@@ -261,11 +262,43 @@ struct MockTransferTests {
             _ = try await mock.upload(uploadRequest, from: body)
             Issue.record("Expected reset to clear transfer stubs")
         } catch let error as MockTransferError {
-            guard case .missingStub = error else {
+            guard case .missingStub(let record) = error else {
                 Issue.record("Expected missingStub after reset, got \(error)")
                 return
             }
+            #expect(record.sequenceID == 3)
+            #expect(error.localizedDescription.contains("upload"))
         }
+    }
+
+    @Test("Transfer construction failures stay typed and record nothing")
+    func constructionFailures() async throws {
+        let mock = MockAPIClient()
+        let response = downloadResponse("unused")
+        let cases: [
+            (MockTransferConstructionBehavior, ExpectedConstructionFailure)
+        ] = [
+            (.invalidURL, .invalidURL),
+            (.encodingFailure, .encoding),
+            (.customizationFailure, .customization),
+            (.customizationCancellation, .cancellation)
+        ]
+
+        for (behavior, expected) in cases {
+            let request = MockTransferConstructionRequest(behavior: behavior)
+            await expectConstructionFailure(expected) {
+                _ = try await mock.download(request)
+            }
+            await expectConstructionFailure(expected) {
+                try await mock.stubDownload(
+                    request,
+                    to: .temporary,
+                    with: response
+                )
+            }
+        }
+
+        #expect(await mock.recordedTransfers.isEmpty)
     }
 
     @Test("Transfer delay cancellation is deterministic")
@@ -324,6 +357,31 @@ struct MockTransferTests {
 
         #expect(observedNanoseconds.withLock { $0 } == 2_000_000_000)
         #expect(await mock.recordedTransfers.count == 1)
+
+        let factoryStarted = AsyncSignal()
+        let factoryMock = MockAPIClient()
+        await factoryMock.stubDownload(
+            MockTransferDownloadRequest.self,
+            using: { _ in
+                await factoryStarted.signal()
+                await AsyncSignal().wait()
+                return downloadResponse("cancelled-factory")
+            }
+        )
+        let factoryTask = Task {
+            try await factoryMock.download(
+                MockTransferDownloadRequest(id: 31)
+            )
+        }
+        await factoryStarted.wait()
+        factoryTask.cancel()
+
+        do {
+            _ = try await factoryTask.value
+            Issue.record("Expected factory cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
     }
 
     @Test("Concurrent transfers receive contiguous unique sequence IDs")
@@ -380,6 +438,8 @@ private enum MockTransferFixtureError: Error, Equatable, Sendable {
     case exactUpload
     case typeDownload
     case bodyEncodingMustBeBypassed
+    case downloadEncoding
+    case downloadCustomization
 }
 
 private struct MockTransferUploadRequest: Request {
@@ -420,6 +480,48 @@ private struct MockTransferDownloadRequest: DownloadRequest {
     }
 }
 
+private enum MockTransferConstructionBehavior: Equatable, Sendable {
+    case invalidURL
+    case encodingFailure
+    case customizationFailure
+    case customizationCancellation
+}
+
+private struct MockTransferConstructionRequest: DownloadRequest {
+    let behavior: MockTransferConstructionBehavior
+    let path = "construction"
+
+    func makeURL(baseURL: URL) -> URL? {
+        guard behavior != .invalidURL else { return nil }
+        return baseURL.appendingPathComponent(path)
+    }
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        if behavior == .encodingFailure {
+            throw MockTransferFixtureError.downloadEncoding
+        }
+        return Data("body".utf8)
+    }
+
+    func customize(_ request: inout URLRequest) throws {
+        switch behavior {
+        case .customizationFailure:
+            throw MockTransferFixtureError.downloadCustomization
+        case .customizationCancellation:
+            throw CancellationError()
+        case .invalidURL, .encodingFailure:
+            break
+        }
+    }
+}
+
+private enum ExpectedConstructionFailure: Equatable {
+    case invalidURL
+    case encoding
+    case customization
+    case cancellation
+}
+
 private func uploadResponse(
     id: Int
 ) -> HTTPResponse<MockTransferValue> {
@@ -456,5 +558,35 @@ private func expectFileTransferError(
         #expect(transferError == expected)
     } catch {
         Issue.record("Expected NetworkError, got \(error)")
+    }
+}
+
+private func expectConstructionFailure(
+    _ expected: ExpectedConstructionFailure,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        Issue.record("Expected transfer construction failure")
+    } catch is CancellationError {
+        #expect(expected == .cancellation)
+    } catch let error as NetworkError {
+        switch (expected, error) {
+        case (.invalidURL, .invalidURL):
+            break
+        case (.encoding, .encodingFailed(let underlying)):
+            #expect(
+                underlying as? MockTransferFixtureError == .downloadEncoding
+            )
+        case (.customization, .requestConfigurationFailed(let underlying)):
+            #expect(
+                underlying as? MockTransferFixtureError
+                    == .downloadCustomization
+            )
+        default:
+            Issue.record("Unexpected construction error: \(error)")
+        }
+    } catch {
+        Issue.record("Unexpected construction error: \(error)")
     }
 }

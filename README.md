@@ -576,7 +576,7 @@ let secondDownload = try await transferClient.download(
 let transfers = await transferMock.recordedTransfers
 ```
 
-Mock transfers perform no filesystem I/O. A file upload source does not need to exist, download destinations are matched and recorded without being created or replaced, and a `DownloadResponse` returns exactly the URL supplied by its stub. Use a download factory, as above, when repeated temporary downloads need distinct URLs. `recordedTransfers` preserves invocation order and includes the final URL, headers, request body, upload source, or download destination; `clearRecordedTransfers()` clears only those records, while `reset()` clears all stubs and recordings.
+Mock transfers perform no filesystem I/O. A file upload source does not need to exist, download destinations are matched and recorded without being created or replaced, and a `DownloadResponse` returns exactly the URL supplied by its stub. Consequently, the mock does not reproduce production failures for missing or unreadable sources and existing destinations; cover those policies with `APIClient` transfer tests. Use a download factory, as above, when repeated temporary downloads need distinct URLs. `recordedTransfers` preserves invocation order and includes the final URL, headers, request body, upload source, or download destination. Transfer sequence IDs remain monotonic for the mock's lifetime, including across `clearRecordedTransfers()` and `reset()`, so in-flight factories cannot reuse an identifier. Clearing records leaves stubs intact; `reset()` clears all stubs and recordings.
 
 WebSocket services can use the same protocol-based pattern with
 `MockWebSocketClient` and `MockWebSocketConnection`:

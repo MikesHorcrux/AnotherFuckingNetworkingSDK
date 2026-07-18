@@ -147,7 +147,14 @@ public enum MockTransferError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .missingStub(let transfer):
-            return "No transfer stub is registered for \(transfer.requestTypeName) at \(transfer.path)."
+            let operation: String
+            switch transfer.operation {
+            case .upload:
+                operation = "upload"
+            case .download:
+                operation = "download"
+            }
+            return "No \(operation) stub is registered for \(transfer.requestTypeName) at \(transfer.path)."
         case .responseTypeMismatch(let transfer):
             return "The registered transfer stub has the wrong response type for \(transfer.requestTypeName)."
         }
@@ -181,6 +188,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
 
     private var stubs: [StubKey: Stub] = [:]
     private var transferStubs: [TransferStubKey: TransferStub] = [:]
+    private var nextTransferSequenceID = 0
     private let baseURL: URL
     private let globalHeaders: [String: String]
     private let encoderFactory: APIClient.EncoderFactory
@@ -942,7 +950,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         context: TransferContext
     ) -> RecordedTransfer {
         let invocation = RecordedTransfer(
-            sequenceID: recordedTransfers.count,
+            sequenceID: nextTransferSequenceID,
             operation: operation,
             requestTypeID: ObjectIdentifier(R.self),
             requestTypeName: String(reflecting: R.self),
@@ -958,6 +966,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
             ),
             requestBody: context.urlRequest.httpBody
         )
+        nextTransferSequenceID += 1
         recordedTransfers.append(invocation)
         return invocation
     }
