@@ -501,6 +501,44 @@ Ordinary value stubs also satisfy response sends with deterministic HTTP `200` m
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
+WebSocket services can use the same protocol-based pattern with
+`MockWebSocketClient` and `MockWebSocketConnection`:
+
+```swift
+let socket = MockWebSocketConnection(
+    url: URL(string: "wss://api.example.com/rooms/lobby/socket")!,
+    negotiatedSubprotocol: "chat.v1",
+    incoming: [
+        .success(.text("welcome")),
+        .success(.binary(Data([0x01, 0x02])))
+    ]
+)
+let socketClient = MockWebSocketClient(
+    baseURL: URL(string: "https://api.example.com")
+)
+await socketClient.stub(ChatSocket.self, with: socket)
+
+let connection = try await socketClient.connect(
+    ChatSocket(roomID: "lobby")
+)
+try await connection.send(text: "hello")
+
+#expect(try await connection.receive() == .text("welcome"))
+#expect(await socket.sentMessages == [.text("hello")])
+```
+
+The client supports type-wide and exact request stubs, errors, and async
+connection factories. Exact matching uses the fully constructed handshake,
+including the final URL and headers, ordered subprotocols, and maximum message
+size. Factories are recommended when every connect should receive an independent
+connection.
+
+The connection mock consumes incoming messages, send results, and ping results
+in FIFO order. Pending receivers can be completed with `enqueueIncoming`,
+`finish`, or `fail`; cancellation removes only the cancelled waiter. Its unified
+`recordedOperations` sequence preserves the order of sends, receives, pings, and
+closes without wall-clock sleeps or live networking.
+
 ## 1.x to 2.x migration
 
 Version 2 is a deliberate major-version modernization:
@@ -508,6 +546,7 @@ Version 2 is a deliberate major-version modernization:
 - Adopt Swift 6.
 - Add `Sendable` to request and decoded response types.
 - Import `AnotherFuckingNetworkingSDKTesting` in tests and change mock setup or inspection to use `await`.
+- Replace hand-written socket doubles with `MockWebSocketClient` and `MockWebSocketConnection` where deterministic queue behavior is sufficient.
 - Add `try` when registering exact request-instance stubs; URL or body construction can now fail explicitly.
 - Replace mock inheritance assumptions with `any APIClientProtocol` injection.
 - Replace `APIClient` subclasses with protocol-based wrappers or injected `APIClientProtocol` values; `APIClient` is now `final`.
