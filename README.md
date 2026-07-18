@@ -224,6 +224,43 @@ let response = try await client.upload(
 
 Use `.data(payload)` for bytes already in memory. The supplied upload body replaces `Request.body` and bypasses `makeBody(using:)`. Data uploads expose those bytes to `customize(_:)` for signing; file uploads remain file-backed and do not copy their contents into the prepared `URLRequest`.
 
+### Multipart form data
+
+Build a multipart body, pass its content type through the request, and upload the encoded bytes:
+
+```swift
+struct UploadProfileRequest: Request {
+    typealias ReturnType = User
+
+    let userID: Int
+    let contentType: String
+
+    var path: String { "users/\(userID)/profile" }
+    var method: HTTPMethod { .post }
+    var headers: [String: String]? {
+        ["Content-Type": contentType]
+    }
+}
+
+var form = MultipartFormData()
+try form.append("Arthur Dent", name: "displayName")
+try form.append(
+    imageData,
+    name: "avatar",
+    filename: "avatar.jpg",
+    contentType: "image/jpeg"
+)
+
+let response = try await client.upload(
+    UploadProfileRequest(userID: 42, contentType: form.contentType),
+    from: .data(try form.encode())
+)
+```
+
+`MultipartFormData` is deliberately memory-backed: every part and the final encoded body must fit in memory. Use the file-backed upload API for a large raw file; multipart streaming and background multipart uploads are separate lifecycle concerns. Text values are UTF-8 and their line endings are normalized to CRLF. Field names and filenames must be nonempty printable US-ASCII, and explicit content types must be bare `type/subtype` values without parameters.
+
+The default initializer generates a boundary. The throwing `init(boundary:)` is intended for protocols or deterministic tests that require an explicit value: boundaries must contain 1–70 allowed MIME boundary characters and cannot end in a space. `encode()` rejects an empty form or a part containing `--<boundary>` instead of emitting ambiguous framing.
+
 Downloads use the shared `HTTPRequest` construction surface without requiring an unused decoded response type:
 
 ```swift

@@ -178,6 +178,46 @@ struct DocumentationExamplesTests {
         #expect(try Data(contentsOf: download.fileURL) == Data("export".utf8))
     }
 
+    @Test("Multipart upload examples compile through the public API")
+    func multipartUpload() async throws {
+        let capturedRequest = LockedBox<URLRequest?>(nil)
+        let stub = StubSession { request in
+            capturedRequest.withLock { $0 = request }
+            return .respond(try .http(
+                for: request,
+                data: Data(#"{"id":42,"displayName":"Arthur"}"#.utf8)
+            ))
+        }
+        let client: any APIClientTransferProtocol = stub.client()
+
+        var form = try MultipartFormData(boundary: "documentation-boundary")
+        try form.append("Arthur Dent", name: "displayName")
+        try form.append(
+            Data([0xFF, 0xD8, 0xFF]),
+            name: "avatar",
+            filename: "avatar.jpg",
+            contentType: "image/jpeg"
+        )
+        let encodedBody = try form.encode()
+
+        let response = try await client.upload(
+            DocumentationUploadProfileRequest(
+                userID: 42,
+                contentType: form.contentType
+            ),
+            from: .data(encodedBody)
+        )
+
+        let request = try #require(capturedRequest.withLock { $0 })
+        #expect(
+            request.value(forHTTPHeaderField: "Content-Type") == form.contentType
+        )
+        #expect(requestBodyData(request) == encodedBody)
+        #expect(
+            response.value == DocumentationUser(id: 42, displayName: "Arthur")
+        )
+    }
+
     @Test("WebSocket examples compile and run through protocol existentials")
     func webSockets() async throws {
         let mockConnection = MockWebSocketConnection(
@@ -320,6 +360,19 @@ private struct DocumentationUploadAvatarRequest: Request {
     var path: String { "users/\(userID)/avatar" }
     let method = HTTPMethod.put
     let headers: [String: String]? = ["Content-Type": "image/jpeg"]
+}
+
+private struct DocumentationUploadProfileRequest: Request {
+    typealias ReturnType = DocumentationUser
+
+    let userID: Int
+    let contentType: String
+
+    var path: String { "users/\(userID)/profile" }
+    let method = HTTPMethod.post
+    var headers: [String: String]? {
+        ["Content-Type": contentType]
+    }
 }
 
 private struct DocumentationExportRequest: DownloadRequest {
