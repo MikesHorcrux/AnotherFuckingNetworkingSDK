@@ -479,7 +479,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         let preparedRequest = try WebSocketRequestBuilder.prepare(
             request,
             baseURL: configuration.baseURL,
-            globalHeaders: configuration.globalHeaders
+            globalHeaders: configuration.globalHeaders,
+            requestCustomizer: configuration.requestCustomizer
         )
         let urlRequest = preparedRequest.urlRequest
         try Task.checkCancellation()

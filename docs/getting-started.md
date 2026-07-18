@@ -46,7 +46,8 @@ Use `requestCustomizer` for concerns that must see the fully assembled
 `URLRequest`, including the resolved URL, method, encoded body, and content
 length. The hook runs after the endpoint's own `customize(_:)` implementation
 and applies consistently to ordinary requests, pagination, streams, uploads,
-and downloads:
+downloads, and WebSocket upgrades. WebSocket upgrades still run strict
+Foundation-handshake validation after the hook:
 
 ```swift
 let client = APIClient(

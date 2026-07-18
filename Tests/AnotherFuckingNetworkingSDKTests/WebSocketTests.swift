@@ -44,6 +44,43 @@ struct WebSocketRequestBuilderTests {
         #expect(urlRequest.httpBody == nil)
     }
 
+    @Test("Global request customization refines a validated upgrade")
+    func globalRequestCustomization() throws {
+        let urlRequest = try WebSocketRequestBuilder.make(
+            WebSocketFixtureRequest(path: "chat"),
+            baseURL: URL(string: "https://example.com"),
+            globalHeaders: [:],
+            requestCustomizer: { request in
+                #expect(request.httpMethod == "GET")
+                request.setValue("trace-42", forHTTPHeaderField: "X-Trace-ID")
+            }
+        )
+
+        #expect(urlRequest.value(forHTTPHeaderField: "X-Trace-ID") == "trace-42")
+        #expect(urlRequest.httpMethod == "GET")
+        #expect(urlRequest.httpBody == nil)
+    }
+
+    @Test("Global WebSocket customization cannot invalidate handshake fields")
+    func globalRequestCustomizationValidation() {
+        let error = requireWebSocketError {
+            try WebSocketRequestBuilder.make(
+                WebSocketFixtureRequest(),
+                baseURL: URL(string: "https://example.com"),
+                globalHeaders: [:],
+                requestCustomizer: { request in
+                    request.setValue("websocket", forHTTPHeaderField: "Upgrade")
+                }
+            )
+        }
+
+        guard case .reservedHeader(let name)? = error else {
+            Issue.record("Expected reservedHeader, got \(String(describing: error))")
+            return
+        }
+        #expect(name == "upgrade")
+    }
+
     @Test("HTTP schemes are converted and WebSocket schemes are retained")
     func supportedSchemes() throws {
         let cases = [
@@ -444,6 +481,9 @@ struct APIClientWebSocketTests {
                 "Authorization": "global-token",
                 "X-Global": "global-value"
             ],
+            requestCustomizer: { request in
+                request.setValue("trace-42", forHTTPHeaderField: "X-Trace-ID")
+            },
             webSocketTransportFactory: { session, request, configuration in
                 capturedInput.withLock {
                     $0 = CapturedWebSocketFactoryInput(
@@ -486,6 +526,8 @@ struct APIClientWebSocketTests {
             == "global-value")
         #expect(captured.request.value(forHTTPHeaderField: "X-Request")
             == "request-value")
+        #expect(captured.request.value(forHTTPHeaderField: "X-Trace-ID")
+            == "trace-42")
         #expect(captured.request.value(forHTTPHeaderField: "X-Custom")
             == "custom-value")
         #expect(captured.request.value(

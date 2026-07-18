@@ -19,7 +19,8 @@ integrating host app.
   cancellation preservation, and opt-in replay-safe retries.
 - Single-pass bounded HTTP byte streams.
 - A global final-request customization hook for correlation IDs, tracing,
-  signing, user-agent policy, and other application-wide HTTP request policy.
+  signing, user-agent policy, and other application-wide HTTP/WebSocket policy;
+  WebSocket upgrades retain strict Foundation-handshake validation.
 - Bounded Server-Sent Events streams with UTF-8 validation, LF/CRLF framing,
   multiline data, IDs, event names, and retry metadata.
 - Typed JSON Lines/NDJSON streams with bounded records and cancellation-safe

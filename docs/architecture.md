@@ -68,9 +68,9 @@ sequenceDiagram
 The configuration snapshot happens before the first transport suspension.
 Request-specific customization runs first, followed by the optional global
 `APIClient.Configuration.requestCustomizer`, so an application-wide policy can
-inspect and enforce the final HTTP `URLRequest` for every HTTP transport
-operation. WebSocket upgrades retain their stricter handshake builder because
-Foundation-owned upgrade fields must not be overwritten by a general hook.
+inspect and enforce the final `URLRequest` for every HTTP transport operation
+and WebSocket upgrade. WebSocket upgrades then run stricter validation so
+Foundation-owned upgrade fields cannot be overwritten by a general hook.
 Retry decisions use the final method where the transport can observe it;
 authentication replay has its own explicit safety policy.
 
