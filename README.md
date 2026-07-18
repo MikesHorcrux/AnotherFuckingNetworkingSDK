@@ -764,13 +764,18 @@ Run the test and strict concurrency gates:
 ```sh
 swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+swift build -c release --enable-parseable-module-interfaces \
+  -Xswiftc -enable-library-evolution \
+  -Xswiftc -strict-concurrency=complete \
+  -Xswiftc -warnings-as-errors
 ```
 
 HTTP tests use isolated `URLProtocol` handlers rather than external network
 calls and are safe to run in parallel. A serialized, dependency-free server on
 an ephemeral `127.0.0.1` port verifies Foundation's real WebSocket upgrade,
-framing, ping, close, rejection, metrics, and delegate paths. CI also performs
-unsigned iOS 15 release builds for both public products.
+framing, ping, close, rejection, metrics, and delegate paths. CI also verifies
+parseable library-evolution interfaces and unsigned iOS 15 distribution builds
+for both public products.
 
 ## License
 

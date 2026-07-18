@@ -25,6 +25,13 @@ jobs:
         run: swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
       - name: Release tests with strict concurrency
         run: swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: Parseable library-evolution interfaces
+        run: |
+          swift build -c release \
+            --enable-parseable-module-interfaces \
+            -Xswiftc -enable-library-evolution \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors
       - name: iOS 15 product builds
         run: |
           xcodebuild -quiet \
@@ -34,6 +41,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
           xcodebuild -quiet \
             -scheme AnotherFuckingNetworkingSDKTesting \
@@ -42,4 +50,5 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
