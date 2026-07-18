@@ -37,6 +37,12 @@ stateDiagram-v2
 `JSONTransferJobStore` for a small app-owned index. JSON writes are atomic and
 run on the SDK's utility file-I/O queue.
 
+For a Foundation background session that continues after the process exits,
+use the coordinator's `recordCheckpoint`, `pause`, `recordFailure`, and
+`commitSuccess` methods from routed delegate callbacks. Call `commitSuccess`
+only after the application has committed a temporary download to its durable
+destination. Each method is actor-isolated and idempotent for late callbacks.
+
 ## Integrating a background session
 
 `BackgroundURLSessionAdapter` owns the Foundation background session and

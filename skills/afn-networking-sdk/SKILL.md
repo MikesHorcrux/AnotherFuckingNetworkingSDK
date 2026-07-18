@@ -46,9 +46,10 @@ source and tests before relying on any example below.
 - Background transfer state: `TransferJob`, `TransferJobStore`,
   `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
   resolution, authentication, destination commits, and relaunch routing in
-  the application layer. The Foundation background adapter is iOS/macOS-only;
-  pair the durable coordinator with platform-owned transports on tvOS,
-  watchOS, and visionOS.
+  the application layer. Use actor-isolated `recordCheckpoint`, `pause`,
+  `recordFailure`, and `commitSuccess` for routed callbacks. The Foundation
+  background adapter is iOS/macOS-only; pair the durable coordinator with
+  platform-owned transports on tvOS, watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
