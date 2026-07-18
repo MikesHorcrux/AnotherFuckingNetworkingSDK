@@ -731,7 +731,11 @@ swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 ```
 
-The suite uses isolated `URLProtocol` handlers rather than live network calls and is safe to run in parallel. CI also performs unsigned iOS 15 release builds for both public products.
+HTTP tests use isolated `URLProtocol` handlers rather than external network
+calls and are safe to run in parallel. A serialized, dependency-free server on
+an ephemeral `127.0.0.1` port verifies Foundation's real WebSocket upgrade,
+framing, ping, close, rejection, metrics, and delegate paths. CI also performs
+unsigned iOS 15 release builds for both public products.
 
 ## License
 
