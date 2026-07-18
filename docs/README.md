@@ -16,8 +16,12 @@ these pages explain decisions, lifecycle contracts, and operational tradeoffs.
 | Persist and resume transfer jobs | [Background and resumable transfers](background-transfers.md) |
 | Export operation metrics safely | [Telemetry and metrics](telemetry.md) |
 | Add reconnect and heartbeat policy | [WebSocket reliability](websocket-reliability.md) |
+| Consume Server-Sent Events | [Server-Sent Events](server-sent-events.md) |
+| Consume typed NDJSON/JSON Lines | [JSON Lines](json-lines.md) |
 | Share duplicate concurrent reads | [Request coalescing](request-coalescing.md) |
 | Add bounded response caching | [Response caching](response-caching.md) |
+| Suppress repeated endpoint failures | [Circuit breaker](circuit-breaker.md) |
+| Validate physical devices and relaunch | [Device validation](device-validation.md) |
 | Review secrets, TLS, redaction, and pinning | [Security](security.md) |
 | Test, benchmark, release, and review changes | [Testing and release](testing-and-release.md) |
 | Track planned capability modules | [Roadmap](roadmap.md) |

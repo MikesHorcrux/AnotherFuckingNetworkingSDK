@@ -48,6 +48,11 @@ WebSocket coverage still runs there and the real loopback suite runs on macOS.
 Simulator tests are explicitly serialized to avoid cooperative-executor
 starvation in cancellation-heavy Swift Testing cases on hosted runners.
 
+Physical-device background execution is a separate release gate. Follow
+[Device and relaunch validation](device-validation.md) for signed host-app
+scenarios; hosted CI must not be cited as proof that an OS-terminated app
+received background callbacks or committed a protected destination.
+
 ## Performance gates
 
 Performance tests should measure a budget, not merely execute a large input.
