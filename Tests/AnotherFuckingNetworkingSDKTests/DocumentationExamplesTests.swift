@@ -177,6 +177,46 @@ struct DocumentationExamplesTests {
         #expect(upload.value == DocumentationUser(id: 42, displayName: "Arthur"))
         #expect(try Data(contentsOf: download.fileURL) == Data("export".utf8))
     }
+
+    @Test("WebSocket examples compile and run through protocol existentials")
+    func webSockets() async throws {
+        let dummyConnection = DocumentationWebSocketConnection(
+            inboundMessages: [
+                .text("welcome"),
+                .binary(Data([0x01, 0x02]))
+            ]
+        )
+        let client: any WebSocketClientProtocol = DocumentationWebSocketClient(
+            connection: dummyConnection
+        )
+        let connection = try await client.connect(
+            DocumentationChatSocket(roomID: "lobby")
+        )
+
+        try await connection.send(text: "hello")
+        let firstMessage = try await connection.receive()
+
+        var streamedMessages: [WebSocketMessage] = []
+        for try await message in connection.messages {
+            streamedMessages.append(message)
+            break
+        }
+
+        try await connection.ping()
+        try await connection.close(code: .normalClosure, reason: "Done")
+
+        let snapshot = await dummyConnection.snapshot()
+        #expect(connection.url == URL(string: "wss://example.com/rooms/lobby/socket"))
+        #expect(connection.negotiatedSubprotocol == "chat.v1")
+        #expect(firstMessage == .text("welcome"))
+        #expect(streamedMessages == [.binary(Data([0x01, 0x02]))])
+        #expect(snapshot.sentMessages == [.text("hello")])
+        #expect(snapshot.pingCount == 1)
+        #expect(snapshot.close == WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        ))
+    }
 }
 
 private func documentationMessage(for error: NetworkError) -> String {
@@ -283,5 +323,89 @@ private struct DocumentationUserService: Sendable {
 
     func user(id: Int) async throws -> DocumentationUser {
         try await client.send(DocumentationGetUserRequest(userID: id))
+    }
+}
+
+private struct DocumentationChatSocket: WebSocketRequest {
+    let roomID: String
+
+    var path: String { "rooms/\(roomID)/socket" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "history", value: "10")]
+    }
+    var headers: [String: String]? {
+        ["Authorization": "Bearer TOKEN"]
+    }
+    var subprotocols: [String] { ["chat.v1"] }
+    var maximumMessageSize: Int? { 1_048_576 }
+}
+
+private struct DocumentationWebSocketClient: WebSocketClientProtocol {
+    let connection: DocumentationWebSocketConnection
+
+    func connect<R: WebSocketRequest>(
+        _ request: R
+    ) async throws -> any WebSocketConnectionProtocol {
+        connection
+    }
+}
+
+private struct DocumentationWebSocketSnapshot: Equatable, Sendable {
+    let sentMessages: [WebSocketMessage]
+    let pingCount: Int
+    let close: WebSocketClose?
+}
+
+private actor DocumentationWebSocketConnection: WebSocketConnectionProtocol {
+    nonisolated let url = URL(string: "wss://example.com/rooms/lobby/socket")!
+    nonisolated let negotiatedSubprotocol: String? = "chat.v1"
+
+    private var currentState = WebSocketConnectionState.open
+    private var inboundMessages: [WebSocketMessage]
+    private var sentMessages: [WebSocketMessage] = []
+    private var pingCount = 0
+    private var closeDetails: WebSocketClose?
+
+    init(inboundMessages: [WebSocketMessage]) {
+        self.inboundMessages = inboundMessages
+    }
+
+    var state: WebSocketConnectionState {
+        get async { currentState }
+    }
+
+    func send(_ message: WebSocketMessage) async throws {
+        sentMessages.append(message)
+    }
+
+    func receive() async throws -> WebSocketMessage {
+        guard !inboundMessages.isEmpty else {
+            throw WebSocketError.connectionClosed(closeDetails)
+        }
+        return inboundMessages.removeFirst()
+    }
+
+    func ping() async throws {
+        pingCount += 1
+    }
+
+    func close(
+        code: WebSocketCloseCode,
+        reason: String?
+    ) async throws {
+        let close = WebSocketClose(
+            code: code,
+            reason: reason.map { Data($0.utf8) }
+        )
+        closeDetails = close
+        currentState = .closed(close)
+    }
+
+    func snapshot() -> DocumentationWebSocketSnapshot {
+        DocumentationWebSocketSnapshot(
+            sentMessages: sentMessages,
+            pingCount: pingCount,
+            close: closeDetails
+        )
     }
 }

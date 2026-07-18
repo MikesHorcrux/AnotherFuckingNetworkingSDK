@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -244,6 +244,47 @@ The default moves Foundation's ephemeral download into a unique SDK-owned tempor
 Successful downloads are never loaded into memory. HTTP failure bodies are included in `NetworkError.requestFailed` only when they are at most 1 MiB; larger download error files produce `data == nil`.
 
 These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
+
+## WebSockets
+
+`APIClient` opens WebSockets with the same base URL, global headers, cookies, authentication handling, and `URLSession` as ordinary requests. An `https` base URL becomes `wss`; `http` becomes `ws`.
+
+```swift
+struct ChatSocket: WebSocketRequest {
+    let roomID: String
+
+    var path: String { "rooms/\(roomID)/socket" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "history", value: "10")]
+    }
+    var headers: [String: String]? {
+        ["Authorization": "Bearer TOKEN"]
+    }
+    var subprotocols: [String] { ["chat.v1"] }
+    var maximumMessageSize: Int? { 1_048_576 }
+}
+
+let connection = try await client.connect(ChatSocket(roomID: "lobby"))
+
+try await connection.send(text: "hello")
+let firstMessage = try await connection.receive()
+
+for try await message in connection.messages {
+    print(message)
+    break
+}
+
+try await connection.ping()
+try await connection.close(code: .normalClosure, reason: "Done")
+```
+
+Use either `receive()` or the demand-driven `messages` sequence; only one receive may be active on a connection at a time. A normal or going-away close frame ends the sequence, while abnormal closure is thrown. `close` starts the closing handshake and returns without waiting for the peer to finish it. Services can depend on `any WebSocketClientProtocol`, and can retain the returned `any WebSocketConnectionProtocol` without depending on `APIClient` directly.
+
+Rejected upgrades throw `WebSocketError.handshakeFailed` with status and response-header metadata. URL, subprotocol, reserved-header, message-size, transport, and close failures remain distinct cases. `APIClient` installs a task-specific delegate to observe the upgrade and close lifecycle; authentication, redirects, cookies, metrics, and the intercepted lifecycle events still flow through the injected session's delegate. Do not install a competing task-specific delegate from `urlSession(_:didCreateTask:)` for these WebSocket tasks.
+
+Cancellation is connection-scoped. Cancelling an active `connect`, `send`, `receive`, or `ping` preserves `CancellationError` and cancels the underlying socket task, closing that connection for every task that shares it. Breaking a `messages` loop after a message has arrived simply stops requesting the next message; cancelling an in-flight iteration closes the connection.
+
+The SDK deliberately does not reconnect automatically or choose a heartbeat schedule. Reconnect backoff, session restoration, and ping intervals/timeouts are application policy; call `ping()` directly or build that policy around `WebSocketClientProtocol`.
 
 ## Empty responses
 
