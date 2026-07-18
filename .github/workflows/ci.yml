@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift 6
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain
+        run: swift --version
+      - name: Debug tests with strict concurrency
+        run: swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: Release tests with strict concurrency
+        run: swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: iOS 15 product builds
+        run: |
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDK \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            build
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDKTesting \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            build

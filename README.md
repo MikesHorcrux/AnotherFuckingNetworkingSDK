@@ -1,514 +1,374 @@
-# 🔥 AnotherFuckingNetworkingSDK 🔥
+# AnotherFuckingNetworkingSDK
 
-Yet another Swift networking library, but this one actually doesn't suck. It's lightweight, powerful, and built for modern Swift with async/await. No bullshit, just clean API calls. ✨
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
 
-Is it missing functionality? Maybe. But it fucking works, and you can just email < Your email here > with your complaints or contribute. Or don't. Whatever. 🤷‍♂️
+## Requirements
 
-## ✨ Features
+- Swift 6.0 or newer
+- iOS 15 or newer
+- macOS 12 or newer
 
-- ✅ 100% Swift, built for modern concurrency with async/await 🚀
-- ✅ Type-safe API requests and responses (so you can stop guessing what the hell your API returns) 🧩
-- ✅ Built-in pagination support that doesn't make you want to throw your laptop 💻🪟
-- ✅ Clear error handling that actually tells you what went wrong 🚨
-- ✅ Request logging with cURL command generation (inspect your requests like a grown-up) 🔍
-- ✅ Mocking support that makes testing not completely suck 🧪
-- ✅ Zero dependencies because who needs that fucking headache 🏝️
-- ✅ Works on iOS 15+, macOS 12+, and other Apple platforms nobody cares about 🍎
+## Installation
 
-## 📦 Installation
-
-### Swift Package Manager
-
-Add the following to your `Package.swift` file, or don't, I'm not your mom: 👩‍👧
+Add the package and core product to your target:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/MikesHorcrux/AnotherFuckingNetworkingSDK.git", from: "1.0.0")
+    .package(
+        url: "https://github.com/MikesHorcrux/AnotherFuckingNetworkingSDK.git",
+        from: "2.0.0"
+    )
 ]
 ```
 
-Or in Xcode:
-1. Go to File → Add Packages... 📁
-2. Enter the repository URL: `https://github.com/MikesHorcrux/AnotherFuckingNetworkingSDK.git`
-3. Click "Add Package" and wait for Xcode to inevitably freeze for no reason ⏳❄️
+```swift
+.target(
+    name: "YourApp",
+    dependencies: [
+        .product(
+            name: "AnotherFuckingNetworkingSDK",
+            package: "AnotherFuckingNetworkingSDK"
+        )
+    ]
+)
+```
 
-## 🚀 Quick Start
+Version 2.0 is the next intended release. Until it is tagged, pin a commit or use the branch containing these changes.
 
-### 1. Configure the client 🔧
+## Define a request
+
+Response and request values are `Sendable`, so they can move safely across Swift concurrency boundaries.
 
 ```swift
+import Foundation
 import AnotherFuckingNetworkingSDK
 
-// Set up the global shared client (the lazy way)
-APIClient.shared.baseURL = URL(string: "https://api.example.com")
-APIClient.shared.globalHeaders = ["Authorization": "Bearer YOUR_TOKEN"]
-
-// Or be a fucking professional and create your own instance
-let client = APIClient(baseURL: URL(string: "https://api.example.com"))
-```
-
-### 2. Define your models 📊
-
-Make sure they conform to `Decodable` or you're gonna have a bad time: 💀
-
-```swift
-struct User: Decodable {
+struct User: Decodable, Sendable {
     let id: Int
-    let name: String
-    let email: String
-    let isAdmin: Bool
-    
-    // Handle snake_case if your backend devs hate camelCase
-    enum CodingKeys: String, CodingKey {
-        case id, name, email
-        case isAdmin = "is_admin"
-    }
+    let displayName: String
+}
+
+struct GetUserRequest: Request {
+    typealias ReturnType = User
+
+    let userID: Int
+    var path: String { "users/\(userID)" }
 }
 ```
 
-### 3. Create request types 📝
-
-This is where the magic happens. Each API endpoint gets its own request type: 🪄
+Create an injected client and send the request:
 
 ```swift
-// Simple GET request
-struct GetUserRequest: Request {
-    typealias ReturnType = User // Tell it what you expect back
-    
-    let userID: Int
-    var path: String { "users/\(userID)" } // Define the endpoint path
-}
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com/v1")!,
+    globalHeaders: ["Authorization": "Bearer TOKEN"]
+)
 
-// POST request with a body
-struct CreateUserRequest: Request {
-    typealias ReturnType = User
-    
-    let name: String
-    let email: String
-    let password: String
-    
-    var path: String { "users" }
-    var method: HTTPMethod { .post } // Override the default GET
-    
-    // Define the request body
-    var body: Data? {
-        try? JSONEncoder().encode([
-            "name": name,
-            "email": email,
-            "password": password
-        ])
-    }
-}
+let user = try await client.send(GetUserRequest(userID: 42))
+```
 
-// Request with query parameters
+An app can still configure `APIClient.shared`. Use `updateConfiguration` when changing multiple values so every request observes one atomic snapshot:
+
+```swift
+APIClient.shared.updateConfiguration { configuration in
+    configuration.baseURL = URL(string: "https://api.example.com/v1")
+    configuration.globalHeaders = ["Authorization": "Bearer TOKEN"]
+}
+```
+
+Injected clients are recommended for services and tests because their configuration and ownership are explicit.
+
+## Methods, queries, headers, and bodies
+
+`Request` defaults to `GET` with no query items, headers, or body. Request headers override client headers case-insensitively.
+
+```swift
 struct SearchUsersRequest: Request {
     typealias ReturnType = [User]
-    
-    let query: String
-    let limit: Int
-    
-    var path: String { "users/search" }
-    
-    var queryItems: [URLQueryItem]? {
-        [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "limit", value: "\(limit)")
-        ]
-    }
-}
 
-// Request with custom headers
-struct AuthenticateRequest: Request {
-    typealias ReturnType = AuthResponse
-    
-    let username: String
-    let password: String
-    
-    var path: String { "auth/login" }
-    var method: HTTPMethod { .post }
-    
-    var headers: [String: String]? {
-        ["Content-Type": "application/json"] 
+    let query: String
+    var path: String { "users/search" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "q", value: query)]
     }
-    
-    var body: Data? {
-        try? JSONEncoder().encode([
-            "username": username,
-            "password": password
-        ])
+    var headers: [String: String]? {
+        ["Accept": "application/json"]
     }
 }
 ```
 
-### 4. Make API calls with async/await ⚡
+Paths are decoded text by default and are percent encoded by the SDK. If an endpoint already supplies a percent-encoded path, return `.percentEncoded` from `pathEncoding` so escape sequences such as `%2F` are preserved.
+
+For an encoded body, implement `makeBody(using:)`. The client supplies a fresh encoder for every request.
 
 ```swift
-func fetchUser(id: Int) async {
-    do {
-        let userRequest = GetUserRequest(userID: id)
-        let user = try await APIClient.shared.send(userRequest)
-        print("Got user: \(user.name), \(user.email)")
-    } catch let error as NetworkError {
-        handleNetworkError(error)
-    } catch {
-        print("Some other shit went wrong: \(error)")
+struct CreateUserRequest: Request {
+    typealias ReturnType = User
+
+    struct Payload: Encodable, Sendable {
+        let displayName: String
+    }
+
+    let payload: Payload
+    var path: String { "users" }
+    var method: HTTPMethod { .post }
+    var headers: [String: String]? {
+        ["Content-Type": "application/json"]
+    }
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        try encoder.encode(payload)
     }
 }
 ```
 
-### 5. Paginated requests that don't suck 📄📄📄
+Pre-encoded `Data` remains supported through the `body` property.
+
+## Configurable encoding and decoding
+
+Factories avoid sharing mutable encoder or decoder instances between concurrent requests:
+
+```swift
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    encoderFactory: {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    },
+    decoderFactory: {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+)
+```
+
+A request can override `decode(_:response:using:)` when an endpoint needs nonstandard decoding. A `PaginatedRequest` can similarly override `decodePage(_:response:using:)` for a nonstandard page envelope.
+
+## Empty responses
+
+Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:
+
+```swift
+struct DeleteUserRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let userID: Int
+    var path: String { "users/\(userID)" }
+    var method: HTTPMethod { .delete }
+}
+
+_ = try await client.send(DeleteUserRequest(userID: 42))
+```
+
+An empty body for any other response type throws `NetworkError.emptyResponse` instead of being reported as a JSON decoding problem.
+
+## Pagination
+
+`PaginatedRequest` preserves the base URL query, request filters, and custom URL construction while replacing existing pagination keys exactly once.
 
 ```swift
 struct ListUsersRequest: PaginatedRequest {
     typealias ReturnType = User
-    
-    var path: String { "users" }
+
     let page: Int
     let pageSize: Int
+    let role: String
+
+    var path: String { "users" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "role", value: role)]
+    }
 }
 
-func fetchAllUsers() async {
-    var currentPage = 1
-    var hasMorePages = true
-    var allUsers: [User] = []
-    
-    while hasMorePages {
-        do {
-            let request = ListUsersRequest(page: currentPage, pageSize: 20)
-            let response = try await APIClient.shared.sendPage(request)
-            
-            allUsers.append(contentsOf: response.items)
-            
-            // Check if there's a next page
-            if let nextPage = response.nextPage {
-                currentPage = nextPage
-            } else {
-                hasMorePages = false
-            }
-        } catch {
-            print("Error fetching users: \(error)")
-            hasMorePages = false
-        }
-    }
-    
-    print("Fetched a total of \(allUsers.count) users")
+let response = try await client.sendPage(
+    ListUsersRequest(page: 1, pageSize: 50, role: "admin")
+)
+
+if let nextPage = response.nextPage {
+    let next = try await client.sendPage(
+        ListUsersRequest(page: nextPage, pageSize: 50, role: "admin")
+    )
+    print(next.items)
 }
 ```
 
-## 🧠 Advanced Usage
+Override `pageQueryName` and `pageSizeQueryName` for APIs that use alternate page-number names such as `page_number` and `per_page`. Only the query names change; the page number is not converted into an item offset. Cursor and offset pagination are intentionally outside this page-number abstraction and should be modeled as ordinary `Request` values.
 
-### Setting up a proper service layer 🏢
+## Error handling and cancellation
 
-Don't be a barbarian. Structure your API calls in service classes: 🏗️
-
-```swift
-class UserService {
-    private let client: APIClient
-    
-    // Dependency injection for testability
-    init(client: APIClient = APIClient.shared) {
-        self.client = client
-    }
-    
-    func getUser(id: Int) async throws -> User {
-        let request = GetUserRequest(userID: id)
-        return try await client.send(request)
-    }
-    
-    func createUser(name: String, email: String, password: String) async throws -> User {
-        let request = CreateUserRequest(name: name, email: email, password: password)
-        return try await client.send(request)
-    }
-    
-    func searchUsers(query: String, limit: Int = 20) async throws -> [User] {
-        let request = SearchUsersRequest(query: query, limit: limit)
-        return try await client.send(request)
-    }
-    
-    func listUsers(page: Int = 1, pageSize: Int = 20) async throws -> PaginatedResponse<User> {
-        let request = ListUsersRequest(page: page, pageSize: pageSize)
-        return try await client.sendPage(request)
-    }
-}
-```
-
-### Error handling that actually makes sense 🚫
+Cancellation is preserved as `CancellationError`. Handle it before `NetworkError`:
 
 ```swift
-func handleNetworkError(_ error: NetworkError) {
+do {
+    let user = try await client.send(GetUserRequest(userID: 42))
+    print(user)
+} catch is CancellationError {
+    // The surrounding task was cancelled.
+} catch let error as NetworkError {
     switch error {
     case .invalidURL:
-        // You fucked up the URL 🤦‍♂️
-        showAlert(title: "Invalid URL", message: "Contact the developer, they can't type URLs correctly")
-        
+        print("The base URL or endpoint path is invalid")
+    case .invalidResponse:
+        print("The response was not HTTP")
+    case .encodingFailed(let underlying):
+        print("Could not encode the request: \(underlying)")
+    case .transport(let urlError):
+        print("Transport failed with \(urlError.code)")
     case .requestFailed(let statusCode, let data):
-        // The server fucked up 💩
-        switch statusCode {
-        case 401:
-            // Token expired or invalid
-            refreshTokenAndRetry()
-        case 403:
-            showAlert(title: "Access Denied", message: "You're not allowed to do that, buddy")
-        case 404:
-            showAlert(title: "Not Found", message: "The thing you're looking for doesn't exist")
-        case 500..<600:
-            showAlert(title: "Server Error", message: "The server is having a bad day")
-        default:
-            if let data = data, let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                print("Server said: \(errorJson)")
-            }
-            showAlert(title: "Error \(statusCode)", message: "Something went wrong")
-        }
-        
-    case .decodingFailed(let decodingError):
-        // The JSON decoder fucked up 💥
-        print("Decoding error: \(decodingError)")
-        showAlert(title: "Data Error", message: "Could not understand the server response")
-        
-    case .unknown(let underlyingError):
-        // Something else fucked up 🤷‍♂️
-        print("Unknown error: \(underlyingError)")
-        showAlert(title: "Unknown Error", message: underlyingError.localizedDescription)
+        print("HTTP \(statusCode), body bytes: \(data?.count ?? 0)")
+    case .emptyResponse(let statusCode):
+        print("HTTP \(statusCode) did not contain the expected body")
+    case .decodingFailed(let underlying):
+        print("Could not decode the response: \(underlying)")
+    case .unknown(let underlying):
+        print("Unexpected failure: \(underlying)")
     }
 }
 ```
 
-## 🧪 Testing with Mock Responses
+HTTP error bodies are preserved as `Data?` for endpoint-specific decoding. Standard URL failures remain inspectable as `URLError` inside `.transport`.
 
-Because tests that hit real APIs are stupid and unreliable. 👎
+## Safe request logging
 
-### 1. Set up your test class 🏗️
-
-```swift
-import XCTest
-@testable import YourAppModule
-import AnotherFuckingNetworkingSDK
-
-class UserServiceTests: XCTestCase {
-    
-    var mockClient: MockAPIClient!
-    var userService: UserService!
-    
-    override func setUp() {
-        super.setUp()
-        // Create a mock client instead of hitting real APIs
-        mockClient = MockAPIClient()
-        
-        // Inject the mock into your service
-        userService = UserService(client: mockClient)
-    }
-    
-    override func tearDown() {
-        mockClient.resetMocks()
-        mockClient = nil
-        userService = nil
-        super.tearDown()
-    }
-```
-
-### 2. Test a successful request ✅
+Logging is disabled unless a logger is passed to the client.
 
 ```swift
-func testGetUser() async throws {
-    // 1. Create fake data 🤥
-    let mockUser = User(id: 42, name: "Arthur Dent", email: "arthur@earth.com", isAdmin: false)
-    
-    // 2. Tell the mock what to return
-    mockClient.mock(GetUserRequest.self, with: mockUser)
-    
-    // 3. Call the API through your service
-    let user = try await userService.getUser(id: 42)
-    
-    // 4. Verify you got what you expected
-    XCTAssertEqual(user.id, 42)
-    XCTAssertEqual(user.name, "Arthur Dent")
-    XCTAssertEqual(user.email, "arthur@earth.com")
-    
-    // 5. Verify the correct request was made
-    XCTAssertTrue(mockClient.calledRequests.contains("users/42"))
-}
-```
-
-### 3. Test with fake errors ❌
-
-```swift
-func testGetUserError() async {
-    // 1. Set up a mock error 💣
-    let mockError = NetworkError.requestFailed(statusCode: 404, data: nil)
-    mockClient.mockError(GetUserRequest.self, with: mockError)
-    
-    // 2. Try to call the API and expect an error
-    do {
-        _ = try await userService.getUser(id: 999)
-        XCTFail("Expected an error but got success")
-    } catch let error as NetworkError {
-        // 3. Verify it's the right error
-        if case .requestFailed(let statusCode, _) = error {
-            XCTAssertEqual(statusCode, 404)
-        } else {
-            XCTFail("Wrong error type")
-        }
-    } catch {
-        XCTFail("Wrong error type: \(error)")
-    }
-}
-```
-
-### 4. Test paginated responses 📑
-
-```swift
-func testListUsers() async throws {
-    // 1. Create fake paginated data
-    let mockUsers = [
-        User(id: 1, name: "User 1", email: "user1@example.com", isAdmin: false),
-        User(id: 2, name: "User 2", email: "user2@example.com", isAdmin: true)
-    ]
-    let mockResponse = PaginatedResponse<User>(
-        items: mockUsers,
-        currentPage: 1,
-        totalPages: 2
+let logger = NetworkingLogger(
+    configuration: .init(
+        bodyPolicy: .redactedJSON(maximumBytes: 16_384)
     )
-    
-    // 2. Tell the mock what to return
-    mockClient.mock(ListUsersRequest.self, with: mockResponse)
-    
-    // 3. Call the API
-    let response = try await userService.listUsers(page: 1)
-    
-    // 4. Verify the results
-    XCTAssertEqual(response.items.count, 2)
-    XCTAssertEqual(response.currentPage, 1)
-    XCTAssertEqual(response.totalPages, 2)
-    XCTAssertEqual(response.nextPage, 2) // Should have a next page
+)
+
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    logger: logger
+)
+```
+
+The logger redacts URL paths by default because identifiers and reset tokens often appear in path components. It also redacts common authorization, cookie, API-key, token, password, secret, and OAuth-code fields; recursively redacts configured JSON keys; omits invalid, binary, or oversized bodies; removes URL credentials and fragments; sorts output deterministically; and POSIX-quotes cURL arguments.
+
+Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API.
+
+You can inject a `Sendable` sink for tests or another logging backend:
+
+```swift
+let logger = NetworkingLogger { level, sanitizedMessage in
+    print("[\(level)] \(sanitizedMessage)")
 }
 ```
 
-### 5. Testing network delays ⏱️
+Only sanitized messages reach the sink.
+
+## Service injection
+
+Depend on `any APIClientProtocol` when a service should accept either the real or mock client:
 
 ```swift
-func testNetworkDelay() async throws {
-    // 1. Create mock data
-    let mockUser = User(id: 42, name: "Slow Response", email: "slow@example.com", isAdmin: false)
-    
-    // 2. Set a mock delay (1 second) 🐢
-    mockClient.mockDelay = 1.0
-    mockClient.mock(GetUserRequest.self, with: mockUser)
-    
-    // 3. Measure how long it takes
-    let startTime = Date()
-    _ = try await userService.getUser(id: 42)
-    let endTime = Date()
-    
-    // 4. Verify the delay
-    let timeInterval = endTime.timeIntervalSince(startTime)
-    XCTAssertGreaterThanOrEqual(timeInterval, 1.0, "Response should be delayed")
-}
-```
+struct UserService: Sendable {
+    let client: any APIClientProtocol
 
-## 🎨 Integration with SwiftUI
-
-Because it's 2024 and people actually use SwiftUI now. 🤷‍♂️
-
-```swift
-struct UserProfileView: View {
-    let userId: Int
-    
-    @State private var user: User?
-    @State private var isLoading = false
-    @State private var error: Error?
-    
-    private let userService = UserService()
-    
-    var body: some View {
-        VStack {
-            if isLoading {
-                ProgressView("Loading user...") 🔄
-            } else if let user = user {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(user.name)
-                        .font(.title)
-                    
-                    Text(user.email)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    
-                    if user.isAdmin {
-                        Text("Admin")
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.red)
-                            .foregroundColor(.white)
-                            .cornerRadius(4)
-                    }
-                }
-                .padding()
-            } else if let error = error {
-                VStack {
-                    Text("Error loading user") ⚠️
-                        .font(.headline)
-                    
-                    Text(error.localizedDescription)
-                        .font(.body)
-                        .foregroundColor(.red)
-                    
-                    Button("Retry") {
-                        loadUser()
-                    }
-                    .buttonStyle(.bordered)
-                    .padding(.top)
-                }
-                .padding()
-            } else {
-                Text("No user data") 🤷‍♂️
-            }
-        }
-        .onAppear {
-            loadUser()
-        }
-    }
-    
-    private func loadUser() {
-        isLoading = true
-        error = nil
-        
-        Task {
-            do {
-                user = try await userService.getUser(id: userId)
-                isLoading = false
-            } catch {
-                self.error = error
-                isLoading = false
-            }
-        }
+    func user(id: Int) async throws -> User {
+        try await client.send(GetUserRequest(userID: id))
     }
 }
 ```
 
-## 🚫 Common Issues and Solutions
+## Testing support
 
-### "I'm getting a 'No mock registered for request' error" 😱
-
-You forgot to register a mock response. Make sure you call `mockClient.mock(YourRequestType.self, with: yourMockData)` before testing.
-
-### "My JSON decoding is failing" 💥
-
-Your model properties don't match what the API returns. Use `CodingKeys` to map between camelCase Swift properties and snake_case JSON fields. Or tell your backend team to use proper camelCase like civilized people. 🧐
-
-### "My authorization isn't working" 🔒
-
-Did you set the global headers? Check that your token is valid and formatted correctly:
+Add the testing product only to test targets:
 
 ```swift
-APIClient.shared.globalHeaders = ["Authorization": "Bearer YOUR_TOKEN"]
+.testTarget(
+    name: "YourAppTests",
+    dependencies: [
+        "YourApp",
+        .product(
+            name: "AnotherFuckingNetworkingSDKTesting",
+            package: "AnotherFuckingNetworkingSDK"
+        )
+    ]
+)
 ```
 
-## 🤝 Contributions
+Register type-wide stubs and inspect calls through the actor with `await`:
 
-Pull requests are welcome. For major changes, open an issue first to discuss what you'd like to change. Or don't, and just submit something amazing that fixes my broken code. 🛠️
+```swift
+import AnotherFuckingNetworkingSDK
+import AnotherFuckingNetworkingSDKTesting
 
-Is something missing? Maybe. Email your-email@example.com with your complaints or - better yet - contribute a fix. 💌
+let mock = MockAPIClient()
+let expected = User(id: 42, displayName: "Arthur")
+await mock.stub(GetUserRequest.self, with: expected)
 
-## 📄 License
+let service = UserService(client: mock)
+let user = try await service.user(id: 42)
+let calls = await mock.recordedRequests
+```
 
-This project is licensed under the MIT License - see the LICENSE file for details. TL;DR: Do whatever the fuck you want with it. 🎉 
+Exact request stubs take precedence over type-wide defaults:
+
+```swift
+await mock.stub(
+    GetUserRequest.self,
+    with: User(id: 0, displayName: "Default")
+)
+try await mock.stub(
+    GetUserRequest(userID: 42),
+    with: User(id: 42, displayName: "Exact")
+)
+```
+
+Exact-instance registration uses `try await` because the mock constructs the request's final URL and encoded body at registration time. Pass the production base URL and encoder factory to `MockAPIClient` when those values affect matching. Recorded calls include that final URL and body.
+
+Paginated responses use the dedicated, compile-time-safe API:
+
+```swift
+let page = PaginatedResponse(
+    items: [expected],
+    currentPage: 1,
+    totalPages: 1
+)
+await mock.stubPage(ListUsersRequest.self, with: page)
+```
+
+Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
+
+## 1.x to 2.x migration
+
+Version 2 is a deliberate major-version modernization:
+
+- Adopt Swift 6.
+- Add `Sendable` to request and decoded response types.
+- Import `AnotherFuckingNetworkingSDKTesting` in tests and change mock setup or inspection to use `await`.
+- Add `try` when registering exact request-instance stubs; URL or body construction can now fail explicitly.
+- Replace mock inheritance assumptions with `any APIClientProtocol` injection.
+- Replace `APIClient` subclasses with protocol-based wrappers or injected `APIClientProtocol` values; `APIClient` is now `final`.
+- Use `stubPage` for paginated responses.
+- Replace direct `mockDelay` mutation with the `MockAPIClient(delay:sleeper:)` initializer or `await mock.setDelay(_:)`.
+- Expect missing page stubs to throw instead of returning an empty page.
+- Handle `.transport`, `.encodingFailed`, `.invalidResponse`, and `.emptyResponse` in `NetworkError` switches.
+- Handle `CancellationError` separately.
+- Pass `NetworkingLogger` explicitly when diagnostics are wanted.
+- Move app-specific sample models out of the SDK namespace.
+- Replace the removed general-purpose dictionary merge and nonce helpers with app-owned utilities.
+
+The familiar `send`, `sendPage`, `ReturnType`, `APIClient.shared`, `baseURL`, `globalHeaders`, and pre-encoded `body` APIs remain available.
+
+## Development
+
+Run the test and strict concurrency gates:
+
+```sh
+swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+```
+
+The suite uses isolated `URLProtocol` handlers rather than live network calls and is safe to run in parallel. CI also performs unsigned iOS 15 release builds for both public products.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
