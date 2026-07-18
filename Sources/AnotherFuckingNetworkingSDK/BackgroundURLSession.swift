@@ -1,3 +1,4 @@
+#if !os(tvOS) && !os(watchOS) && !os(visionOS)
 import Foundation
 
 /// Privacy-safe events emitted by a background URLSession delegate.
@@ -208,3 +209,4 @@ public final class BackgroundURLSessionAdapter: Sendable {
         session.invalidateAndCancel()
     }
 }
+#endif

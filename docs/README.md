@@ -35,7 +35,8 @@ flowchart LR
 ## Supported baseline
 
 - Swift 6 language mode and strict concurrency validation.
-- iOS 15 and macOS 12 package deployment targets.
+- iOS 15, macOS 12, tvOS 15, watchOS 8, and visionOS 1 package deployment
+  targets; Mac Catalyst is evaluated by CI.
 - Foundation `URLSession` is the transport; the SDK does not replace the
   system HTTP, TLS, cookie, redirect, or HTTP/3 implementations.
 - Observation adapters are availability-gated; the core remains usable on the

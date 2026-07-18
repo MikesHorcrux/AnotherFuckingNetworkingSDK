@@ -6,7 +6,7 @@ import Observation
 /// performs only small property assignments there, giving Observation clients
 /// fine-grained invalidation without moving encoding, transport, or decoding
 /// work onto the UI executor.
-@available(iOS 17.0, macOS 14.0, *)
+@available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
 @MainActor
 @Observable
 public final class ObservableNetworkActivity {

@@ -46,7 +46,9 @@ source and tests before relying on any example below.
 - Background transfer state: `TransferJob`, `TransferJobStore`,
   `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
   resolution, authentication, destination commits, and relaunch routing in
-  the application layer.
+  the application layer. The Foundation background adapter is iOS/macOS-only;
+  pair the durable coordinator with platform-owned transports on tvOS,
+  watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
@@ -144,7 +146,10 @@ env CLANG_MODULE_CACHE_PATH=/private/tmp/afn-clang-module-cache \
 
 Also run Release/library-evolution builds for public API changes. Add tests
 for cancellation, retries, metadata, redaction, actor isolation, and the
-oldest supported platform when behavior crosses a platform boundary.
+oldest supported platform when behavior crosses a platform boundary. The
+package declares iOS 15, macOS 12, tvOS 15, watchOS 8, and visionOS 1 targets;
+CI evaluates additional product builds when those SDKs are installed and
+always builds iOS, macOS, and Mac Catalyst.
 
 ## Repository references
 

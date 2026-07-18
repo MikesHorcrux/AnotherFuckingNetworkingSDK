@@ -11,6 +11,15 @@ implementation rules live in [skills/afn-networking-sdk](skills/afn-networking-s
 - Swift 6.0 or newer
 - iOS 15 or newer
 - macOS 12 or newer
+- tvOS 15 or newer
+- watchOS 8 or newer
+- visionOS 1 or newer
+
+The package also evaluates Mac Catalyst in CI. Background URLSession lifecycle
+behavior and device/relaunch semantics remain platform-specific integration
+responsibilities; the SDK's background URLSession adapter is limited to iOS and
+macOS, while the durable transfer coordinator can be paired with platform-owned
+transports elsewhere.
 
 ## Installation
 

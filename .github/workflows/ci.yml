@@ -79,3 +79,53 @@ jobs:
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
+      - name: Additional Apple platform product builds (when installed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_platform() {
+            local platform="$1"
+            local label="$2"
+            local destination="generic/platform=${platform}"
+            if ! xcodebuild -quiet \
+              -scheme AnotherFuckingNetworkingSDK \
+              -destination "$destination" \
+              -showBuildSettings >/dev/null 2>&1; then
+              echo "Skipping ${label}: SDK/destination is not installed on this runner."
+              return 0
+            fi
+            for scheme in AnotherFuckingNetworkingSDK AnotherFuckingNetworkingSDKTesting; do
+              xcodebuild -quiet \
+                -scheme "$scheme" \
+                -destination "$destination" \
+                -configuration Release \
+                CODE_SIGNING_ALLOWED=NO \
+                SWIFT_STRICT_CONCURRENCY=complete \
+                SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+                BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+                build
+            done
+          }
+          build_platform tvOS "tvOS 15"
+          build_platform watchOS "watchOS 8"
+          build_platform visionOS "visionOS 1"
+      - name: Mac Catalyst product builds
+        run: |
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDK \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            build
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDKTesting \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            build

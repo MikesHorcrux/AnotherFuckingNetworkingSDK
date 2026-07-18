@@ -137,6 +137,9 @@ data-retention policy.
 - Test relaunch and duplicate delegate callbacks with a real background-session
   integration target on each supported Apple platform.
 
-The adapter is available on the package's iOS 15/macOS 12 baseline. Platform
-behavior still needs device/relaunch integration coverage, and platform APIs
-may differ; keep those checks in the application lifecycle target.
+The adapter is available on the package's iOS 15/macOS 12 baseline. It is
+intentionally unavailable on tvOS, watchOS, and visionOS because their
+background URLSession lifecycle contracts differ; use the durable coordinator
+with a platform-owned transfer implementation there. Platform behavior still
+needs device/relaunch integration coverage, and APIs may differ; keep those
+checks in the application lifecycle target.
