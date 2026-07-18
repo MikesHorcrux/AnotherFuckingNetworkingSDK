@@ -281,7 +281,7 @@ public struct WebSocketMessages: AsyncSequence, Sendable {
 
 // MARK: - Request construction
 
-enum WebSocketRequestBuilder {
+package enum WebSocketRequestBuilder {
     private static let reservedHeaders: Set<String> = [
         "connection",
         "host",
@@ -292,7 +292,7 @@ enum WebSocketRequestBuilder {
         "sec-websocket-version"
     ]
 
-    static func make<R: WebSocketRequest>(
+    package static func make<R: WebSocketRequest>(
         _ request: R,
         baseURL: URL?,
         globalHeaders: [String: String]
