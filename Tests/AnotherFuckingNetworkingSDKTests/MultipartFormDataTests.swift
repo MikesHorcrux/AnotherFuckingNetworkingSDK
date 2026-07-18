@@ -110,7 +110,10 @@ struct MultipartFormDataTests {
 
     @Test("Invalid names and filenames are rejected without mutation")
     func dispositionValidationIsAtomic() throws {
-        let invalidValues = ["", "line\nbreak", "carriage\rreturn", "tab\t", "nul\0", "café"]
+        let invalidValues = [
+            "", "line\nbreak", "carriage\rreturn", "tab\t", "nul\0",
+            "delete\u{7F}", "café"
+        ]
 
         for value in invalidValues {
             var nameForm = try MultipartFormData(boundary: "NameBoundary")
@@ -139,6 +142,26 @@ struct MultipartFormDataTests {
         let before = try form.encode()
         #expect(throws: MultipartEncodingError.invalidName("bad\nname")) {
             try form.append("ignored", name: "bad\nname")
+        }
+        #expect(try form.encode() == before)
+        #expect(throws: MultipartEncodingError.invalidFilename("bad\rfile")) {
+            try form.append(
+                Data(),
+                name: "valid",
+                filename: "bad\rfile"
+            )
+        }
+        #expect(try form.encode() == before)
+        #expect(
+            throws: MultipartEncodingError.invalidContentType(
+                "text/plain; charset=utf-8"
+            )
+        ) {
+            try form.append(
+                Data(),
+                name: "valid",
+                contentType: "text/plain; charset=utf-8"
+            )
         }
         #expect(try form.encode() == before)
     }

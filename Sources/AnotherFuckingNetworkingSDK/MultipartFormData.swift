@@ -22,7 +22,7 @@ public enum MultipartEncodingError: LocalizedError, Equatable, Sendable {
         case .emptyForm:
             return "A multipart form must contain at least one part."
         case .boundaryCollision(let partIndex):
-            return "Multipart part \(partIndex) contains the selected boundary."
+            return "Multipart part \(partIndex) contains the selected boundary delimiter marker."
         }
     }
 }
@@ -30,7 +30,7 @@ public enum MultipartEncodingError: LocalizedError, Equatable, Sendable {
 /// An ordered, memory-backed `multipart/form-data` body.
 ///
 /// The form preserves duplicate names and insertion order. Encoding validates
-/// that the selected boundary does not occur in a part payload. Use this type
+/// that the selected boundary delimiter marker does not occur in a payload. Use this type
 /// for payloads that are appropriate to materialize completely in memory;
 /// large file-backed and streaming bodies require a separate policy.
 public struct MultipartFormData: Sendable {
@@ -129,7 +129,7 @@ public struct MultipartFormData: Sendable {
     ///
     /// A fixed boundary and identical ordered parts always produce identical
     /// bytes. Encoding an empty form or a payload containing the selected
-    /// boundary fails rather than emitting an ambiguous body.
+    /// boundary delimiter marker fails rather than emitting an ambiguous body.
     public func encode() throws -> Data {
         guard !parts.isEmpty else {
             throw MultipartEncodingError.emptyForm
