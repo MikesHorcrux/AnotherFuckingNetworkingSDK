@@ -320,7 +320,7 @@ struct RetryTransportTests {
             )))
         }
 
-        guard await sleeperStarted.wait() else {
+        guard await sleeperStarted.wait(timeoutNanoseconds: 30_000_000_000) else {
             task.cancel()
             _ = try? await task.value
             return
@@ -584,7 +584,7 @@ struct RetryTransportTests {
             )))
         }
 
-        guard await sleeperStarted.wait() else {
+        guard await sleeperStarted.wait(timeoutNanoseconds: 30_000_000_000) else {
             task.cancel()
             _ = try? await task.value
             return
