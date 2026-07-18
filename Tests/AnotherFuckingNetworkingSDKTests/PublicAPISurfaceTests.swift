@@ -82,6 +82,17 @@ struct PublicAPISurfaceTests {
         observable.stop()
     }
 
+    @Test("Custom WebSocket conformers retain a lifecycle snapshot fallback")
+    func customWebSocketStateFallback() async {
+        let connection: any WebSocketConnectionProtocol =
+            SnapshotOnlyWebSocketConnection()
+        requireSendable(connection.states)
+        var iterator = connection.states.makeAsyncIterator()
+
+        #expect(await iterator.next() == .closing)
+        #expect(await iterator.next() == nil)
+    }
+
     @Test("The logger reports non-HTTP responses without raw payloads")
     func nonHTTPLogging() {
         let messages = LockedBox<[String]>([])
@@ -102,3 +113,22 @@ struct PublicAPISurfaceTests {
 }
 
 private func requireSendable<T: Sendable>(_ value: T) {}
+
+private struct SnapshotOnlyWebSocketConnection: WebSocketConnectionProtocol {
+    let url = URL(string: "wss://example.com/socket")!
+    let negotiatedSubprotocol: String? = nil
+    let state = WebSocketConnectionState.closing
+
+    func send(_ message: WebSocketMessage) async throws {}
+
+    func receive() async throws -> WebSocketMessage {
+        throw WebSocketError.connectionClosing
+    }
+
+    func ping() async throws {}
+
+    func close(
+        code: WebSocketCloseCode,
+        reason: String?
+    ) async throws {}
+}

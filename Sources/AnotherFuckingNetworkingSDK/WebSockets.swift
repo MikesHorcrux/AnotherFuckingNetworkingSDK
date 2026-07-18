@@ -211,6 +211,11 @@ public protocol WebSocketConnectionProtocol: Sendable {
     var negotiatedSubprotocol: String? { get }
     var state: WebSocketConnectionState { get async }
 
+    /// A newest-only lifecycle sequence. SDK connections push lifecycle
+    /// changes, coalesce intermediate states for slow consumers, and finish
+    /// after `closed`.
+    var states: WebSocketConnectionStates { get }
+
     /// Sends one complete message.
     ///
     /// Success means Foundation accepted the message for transmission; it is
@@ -228,6 +233,12 @@ public protocol WebSocketConnectionProtocol: Sendable {
 }
 
 public extension WebSocketConnectionProtocol {
+    /// Source-compatible fallback for custom conformers. It emits the current
+    /// state once; conformers with push lifecycle events should override it.
+    var states: WebSocketConnectionStates {
+        WebSocketConnectionStates(currentState: { await self.state })
+    }
+
     var messages: WebSocketMessages {
         WebSocketMessages(connection: self)
     }
@@ -242,6 +253,68 @@ public extension WebSocketConnectionProtocol {
 
     func close() async throws {
         try await close(code: .normalClosure, reason: nil)
+    }
+}
+
+/// A bounded asynchronous sequence of WebSocket lifecycle states.
+public struct WebSocketConnectionStates: AsyncSequence, Sendable {
+    public typealias Element = WebSocketConnectionState
+
+    fileprivate enum Source: Sendable {
+        case stream(
+            @Sendable () -> AsyncStream<WebSocketConnectionState>
+        )
+        case current(@Sendable () async -> WebSocketConnectionState)
+    }
+
+    private let source: Source
+
+    package init(
+        stream: @escaping @Sendable () -> AsyncStream<
+            WebSocketConnectionState
+        >
+    ) {
+        source = .stream(stream)
+    }
+
+    fileprivate init(
+        currentState: @escaping @Sendable () async -> WebSocketConnectionState
+    ) {
+        source = .current(currentState)
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(source: source)
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private var streamIterator: AsyncStream<
+            WebSocketConnectionState
+        >.Iterator?
+        private let currentState: (
+            @Sendable () async -> WebSocketConnectionState
+        )?
+        private var emittedCurrentState = false
+
+        fileprivate init(source: Source) {
+            switch source {
+            case .stream(let makeStream):
+                streamIterator = makeStream().makeAsyncIterator()
+                currentState = nil
+            case .current(let currentState):
+                streamIterator = nil
+                self.currentState = currentState
+            }
+        }
+
+        public mutating func next() async -> WebSocketConnectionState? {
+            if streamIterator != nil {
+                return await streamIterator?.next()
+            }
+            guard !emittedCurrentState, let currentState else { return nil }
+            emittedCurrentState = true
+            return await currentState()
+        }
     }
 }
 
@@ -667,6 +740,23 @@ protocol WebSocketTransport: Sendable {
     func close(code: WebSocketCloseCode, reason: Data?)
     func cancel()
     func status() -> WebSocketTransportStatus
+    func stateStream() -> AsyncStream<WebSocketConnectionState>
+}
+
+extension WebSocketTransport {
+    func stateStream() -> AsyncStream<WebSocketConnectionState> {
+        let status = status()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) {
+            continuation in
+            switch status {
+            case .open:
+                continuation.yield(.open)
+            case .closed(let close):
+                continuation.yield(.closed(close))
+            }
+            continuation.finish()
+        }
+    }
 }
 
 final class URLSessionWebSocketTransport: WebSocketTransport,
@@ -682,6 +772,9 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     private let adapter: any WebSocketTaskAdapter
     private let lifecycle = CriticalState(LifecycleState())
     private let openContinuation = OneShotContinuation<String?>()
+    private let stateBroadcaster = LatestValueBroadcaster<
+        WebSocketConnectionState
+    >(.open)
 
     convenience init(
         session: URLSession,
@@ -749,12 +842,14 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     func close(code: WebSocketCloseCode, reason: Data?) {
+        stateBroadcaster.publish(.closing)
         adapter.close(code: code, reason: reason)
     }
 
     func status() -> WebSocketTransportStatus {
         let taskClose = adapter.closeDetails()
-        return lifecycle.withCriticalRegion { state -> WebSocketTransportStatus in
+        let status = lifecycle.withCriticalRegion {
+            state -> WebSocketTransportStatus in
             if let taskClose {
                 state.close = taskClose
                 state.isCompleted = true
@@ -764,23 +859,32 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
             }
             return .open
         }
+        if let taskClose {
+            stateBroadcaster.finish(with: .closed(taskClose))
+        }
+        return status
+    }
+
+    func stateStream() -> AsyncStream<WebSocketConnectionState> {
+        stateBroadcaster.stream()
     }
 
     func cancel() {
         let taskClose = adapter.closeDetails()
-        let shouldCancel = lifecycle.withCriticalRegion { state in
+        let cancellation = lifecycle.withCriticalRegion { state in
             if let taskClose {
                 state.close = taskClose
             }
             guard !state.isCompleted, !state.cancelRequested else {
-                return false
+                return (shouldCancel: false, close: state.close)
             }
             state.cancelRequested = true
             state.isCompleted = true
-            return true
+            return (shouldCancel: true, close: state.close)
         }
-        if shouldCancel {
+        if cancellation.shouldCancel {
             adapter.cancel()
+            stateBroadcaster.finish(with: .closed(cancellation.close))
         }
         openContinuation.resolve(.failure(CancellationError()))
     }
@@ -817,6 +921,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
         switch event {
         case .opened(let negotiatedSubprotocol):
             lifecycle.withCriticalRegion { $0.didOpen = true }
+            stateBroadcaster.publish(.open)
             openContinuation.resolve(.success(negotiatedSubprotocol))
 
         case .closed(let close):
@@ -824,16 +929,20 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
                 state.close = close
                 state.isCompleted = true
             }
+            stateBroadcaster.finish(with: .closed(close))
             openContinuation.resolve(.failure(
                 WebSocketError.connectionClosed(close)
             ))
 
         case .completed(let error):
-            let didOpen = lifecycle.withCriticalRegion { state in
+            let completion = lifecycle.withCriticalRegion { state in
                 state.isCompleted = true
-                return state.didOpen
+                return (didOpen: state.didOpen, close: state.close)
             }
-            guard !didOpen else { return }
+            stateBroadcaster.finish(with: .closed(completion.close))
+            if completion.didOpen {
+                return
+            }
             if let response = adapter.handshakeResponse() {
                 openContinuation.resolve(.failure(
                     WebSocketError.handshakeFailed(
@@ -854,20 +963,21 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
 
     private func markCompleted() {
         let taskClose = adapter.closeDetails()
-        let shouldCancel = lifecycle.withCriticalRegion { state in
+        let completion = lifecycle.withCriticalRegion { state in
             state.isCompleted = true
             if let taskClose {
                 state.close = taskClose
             }
             guard taskClose == nil, !state.cancelRequested else {
-                return false
+                return (shouldCancel: false, close: state.close)
             }
             state.cancelRequested = true
-            return true
+            return (shouldCancel: true, close: state.close)
         }
-        if shouldCancel {
+        if completion.shouldCancel {
             adapter.cancel()
         }
+        stateBroadcaster.finish(with: .closed(completion.close))
     }
 }
 
@@ -877,7 +987,7 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
     public nonisolated let url: URL
     public nonisolated let negotiatedSubprotocol: String?
 
-    private let transport: any WebSocketTransport
+    private nonisolated let transport: any WebSocketTransport
     private var currentState = WebSocketConnectionState.open
     private var receiveInProgress = false
 
@@ -895,6 +1005,13 @@ public actor WebSocketConnection: WebSocketConnectionProtocol {
         get async {
             resolvedState()
         }
+    }
+
+    public nonisolated var states: WebSocketConnectionStates {
+        let transport = self.transport
+        return WebSocketConnectionStates(stream: {
+            transport.stateStream()
+        })
     }
 
     public func send(_ message: WebSocketMessage) async throws {

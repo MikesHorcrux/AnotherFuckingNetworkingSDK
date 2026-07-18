@@ -311,6 +311,12 @@ struct ChatSocket: WebSocketRequest {
 
 let connection = try await client.connect(ChatSocket(roomID: "lobby"))
 
+let lifecycleTask = Task {
+    for await state in connection.states {
+        print(state)
+    }
+}
+
 try await connection.send(text: "hello")
 let firstMessage = try await connection.receive()
 
@@ -324,6 +330,27 @@ try await connection.close(code: .normalClosure, reason: "Done")
 ```
 
 Use either `receive()` or the demand-driven `messages` sequence; only one receive may be active on a connection at a time. A normal or going-away close frame ends the sequence, while abnormal closure is thrown. `close` starts the closing handshake and returns without waiting for the peer to finish it. Services can depend on `any WebSocketClientProtocol`, and can retain the returned `any WebSocketConnectionProtocol` without depending on `APIClient` directly.
+
+`states` emits an immediate lifecycle snapshot, pushes later `.open`,
+`.closing`, and `.closed` transitions, and finishes after closure. Each
+subscriber has a newest-only buffer, so an idle or slow observer cannot grow
+memory without bound. The SDK connection and `MockWebSocketConnection` both
+push peer closure without requiring a `state` poll or another I/O operation.
+Custom `WebSocketConnectionProtocol` conformers keep source compatibility via
+a one-snapshot default and can override `states` when they have push events.
+
+On iOS 17 or macOS 14 and newer, a main-actor Observation adapter can bridge
+that sequence directly into UI state while the connection remains actor
+isolated off the main actor:
+
+```swift
+@MainActor
+func makeSocketModel(
+    for connection: any WebSocketConnectionProtocol
+) -> ObservableWebSocketState {
+    ObservableWebSocketState(connection: connection)
+}
+```
 
 Rejected upgrades throw `WebSocketError.handshakeFailed` with status and response-header metadata. URL, subprotocol, reserved-header, message-size, transport, and close failures remain distinct cases. `APIClient` installs a task-specific delegate to observe the upgrade and close lifecycle; authentication, redirects, cookies, metrics, and the intercepted lifecycle events still flow through the injected session's delegate. Do not install a competing task-specific delegate from `urlSession(_:didCreateTask:)` for these WebSocket tasks.
 
@@ -668,7 +695,8 @@ be completed with `enqueueIncoming`, `finish`, or `fail`. Its unified
 `recordedOperations` sequence preserves the order of sends, receives, pings, and
 closes without wall-clock sleeps or live networking. Request and operation
 sequence IDs remain monotonic for each mock's lifetime, including across clear
-and reset calls.
+and reset calls. Its `states` sequence mirrors production lifecycle events and
+starts a fresh open sequence after `reset()`.
 
 ## 1.x to 2.x migration
 

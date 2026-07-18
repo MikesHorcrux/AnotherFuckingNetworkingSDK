@@ -274,6 +274,77 @@ struct MockWebSocketConnectionTests {
         }
     }
 
+    @Test("Lifecycle states are pushed in order and finish after closure")
+    func lifecycleStates() async throws {
+        let mock = MockWebSocketConnection()
+        let states = mock.states
+        requireSendable(states)
+        var firstIterator = states.makeAsyncIterator()
+        var secondIterator = states.makeAsyncIterator()
+        var slowIterator = states.makeAsyncIterator()
+
+        #expect(await firstIterator.next() == .open)
+        #expect(await secondIterator.next() == .open)
+        #expect(await slowIterator.next() == .open)
+
+        try await mock.close(code: .normalClosure, reason: "Done")
+        #expect(await firstIterator.next() == .closing)
+        #expect(await secondIterator.next() == .closing)
+
+        let peerClose = WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        )
+        await mock.finish(with: peerClose)
+
+        #expect(await firstIterator.next() == .closed(peerClose))
+        #expect(await secondIterator.next() == .closed(peerClose))
+        #expect(await slowIterator.next() == .closed(peerClose))
+        #expect(await firstIterator.next() == nil)
+        #expect(await secondIterator.next() == nil)
+        #expect(await slowIterator.next() == nil)
+
+        var lateIterator = states.makeAsyncIterator()
+        #expect(await lateIterator.next() == .closed(peerClose))
+        #expect(await lateIterator.next() == nil)
+
+        await mock.reset()
+        #expect(await firstIterator.next() == nil)
+        var resetIterator = states.makeAsyncIterator()
+        #expect(await resetIterator.next() == .open)
+    }
+
+    @available(iOS 17.0, macOS 14.0, *)
+    @MainActor
+    @Test("Observation adapter follows mock lifecycle states")
+    func observableLifecycleState() async throws {
+        let mock = MockWebSocketConnection()
+        let observable = ObservableWebSocketState(connection: mock)
+
+        #expect(observable.state == .open)
+
+        try await mock.close(code: .normalClosure, reason: nil)
+        await expectObservableState(.closing, on: observable)
+
+        let peerClose = WebSocketClose(code: .normalClosure)
+        await mock.finish(with: peerClose)
+        await expectObservableState(.closed(peerClose), on: observable)
+
+        #expect(observable.isOpen == false)
+        #expect(observable.isClosing == false)
+        #expect(observable.close == peerClose)
+        observable.stop()
+
+        await mock.reset()
+        let stoppedObservable = ObservableWebSocketState(connection: mock)
+        stoppedObservable.stop()
+        try await mock.close(code: .normalClosure, reason: nil)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        #expect(stoppedObservable.state == .open)
+    }
+
     @Test("Normal finish ends the asynchronous message sequence")
     func cleanSequenceFinish() async throws {
         let mock = MockWebSocketConnection()
@@ -401,3 +472,22 @@ private func expectPendingReceives(
         "Expected \(expected) pending receive(s), got \(await connection.pendingReceiveCount)"
     )
 }
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+private func expectObservableState(
+    _ expected: WebSocketConnectionState,
+    on observable: ObservableWebSocketState
+) async {
+    for _ in 0..<1_000 {
+        if observable.state == expected {
+            return
+        }
+        await Task.yield()
+    }
+    Issue.record(
+        "Expected observable state \(expected), got \(observable.state)"
+    )
+}
+
+private func requireSendable<Value: Sendable>(_ value: Value) {}

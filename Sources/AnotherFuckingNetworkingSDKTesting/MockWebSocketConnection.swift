@@ -40,6 +40,13 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     /// The connection's current lifecycle state.
     public private(set) var state: WebSocketConnectionState = .open
 
+    public nonisolated var states: WebSocketConnectionStates {
+        let stateBroadcaster = self.stateBroadcaster
+        return WebSocketConnectionStates(stream: {
+            stateBroadcaster.stream()
+        })
+    }
+
     /// Every accepted connection operation in invocation order.
     public private(set) var recordedOperations: [
         RecordedWebSocketOperation
@@ -81,6 +88,9 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     private var terminalError: (any Error)?
     private var nextSequenceID = 0
     private var lifecycleGeneration = 0
+    private nonisolated let stateBroadcaster = LatestValueBroadcaster<
+        WebSocketConnectionState
+    >(.open)
 
     /// Creates an open mock connection.
     ///
@@ -229,6 +239,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         record(.close(close))
         closeDetails = close
         state = .closing
+        stateBroadcaster.publish(.closing)
         incomingResults.removeAll(keepingCapacity: true)
         drainReceiveWaiters(throwing: WebSocketError.connectionClosing)
     }
@@ -243,6 +254,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         let finalClose = close ?? closeDetails
         closeDetails = finalClose
         state = .closed(finalClose)
+        stateBroadcaster.finish(with: .closed(finalClose))
         clearQueuedResults()
         drainReceiveWaiters(
             throwing: WebSocketError.connectionClosed(finalClose)
@@ -265,6 +277,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
 
         terminalError = error
         state = .closed(closeDetails)
+        stateBroadcaster.finish(with: .closed(closeDetails))
         clearQueuedResults()
         drainReceiveWaiters(throwing: error)
     }
@@ -287,6 +300,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         terminalError = nil
         closeDetails = nil
         state = .open
+        stateBroadcaster.reset(to: .open)
     }
 
     // MARK: Private helpers
@@ -351,6 +365,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     private func closeAfterOperationFailure(throwing error: any Error) {
         guard isOpen else { return }
         state = .closed(closeDetails)
+        stateBroadcaster.finish(with: .closed(closeDetails))
         clearQueuedResults()
         drainReceiveWaiters(throwing: error)
     }
@@ -361,6 +376,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         }
         self.receiveWaiter = nil
         state = .closed(closeDetails)
+        stateBroadcaster.finish(with: .closed(closeDetails))
         clearQueuedResults()
         receiveWaiter.continuation.resume(throwing: CancellationError())
     }

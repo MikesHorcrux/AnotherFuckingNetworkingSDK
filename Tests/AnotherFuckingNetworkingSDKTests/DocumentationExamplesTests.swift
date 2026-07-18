@@ -298,6 +298,9 @@ struct DocumentationExamplesTests {
         let connection = try await client.connect(
             DocumentationChatSocket(roomID: "lobby")
         )
+        var stateIterator = connection.states.makeAsyncIterator()
+
+        #expect(await stateIterator.next() == .open)
 
         try await connection.send(text: "hello")
         let firstMessage = try await connection.receive()
@@ -310,6 +313,13 @@ struct DocumentationExamplesTests {
 
         try await connection.ping()
         try await connection.close(code: .normalClosure, reason: "Done")
+        #expect(await stateIterator.next() == .closing)
+        await mockConnection.finish()
+        #expect(await stateIterator.next() == .closed(WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        )))
+        #expect(await stateIterator.next() == nil)
 
         #expect(connection.url == URL(string: "wss://example.com/rooms/lobby/socket"))
         #expect(connection.negotiatedSubprotocol == "chat.v1")

@@ -538,6 +538,61 @@ struct URLSessionWebSocketTransportTests {
         #expect(close == peerClose)
     }
 
+    @Test("Lifecycle states observe an idle peer closing the connection")
+    func lifecycleStatesObserveIdlePeerClosure() async throws {
+        let url = try #require(URL(string: "wss://example.com/socket"))
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil)
+        )
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+        _ = try await transport.open()
+        let connection = WebSocketConnection(
+            url: url,
+            negotiatedSubprotocol: nil,
+            transport: transport
+        )
+        var iterator = connection.states.makeAsyncIterator()
+
+        #expect(await iterator.next() == .open)
+
+        let peerClose = WebSocketClose(
+            code: .goingAway,
+            reason: Data("server restart".utf8)
+        )
+        adapter.emit(.closed(peerClose))
+
+        #expect(await iterator.next() == .closed(peerClose))
+        #expect(await iterator.next() == nil)
+        #expect(await connection.state == .closed(peerClose))
+    }
+
+    @Test("A close snapshot wakes lifecycle observers without a delegate event")
+    func lifecycleStatesObserveTaskCloseSnapshot() async throws {
+        let url = try #require(URL(string: "wss://example.com/socket"))
+        let adapter = FakeWebSocketTaskAdapter(
+            eventOnResume: .opened(negotiatedSubprotocol: nil)
+        )
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+        _ = try await transport.open()
+        let connection = WebSocketConnection(
+            url: url,
+            negotiatedSubprotocol: nil,
+            transport: transport
+        )
+        var iterator = connection.states.makeAsyncIterator()
+        #expect(await iterator.next() == .open)
+
+        let peerClose = WebSocketClose(
+            code: .serviceRestart,
+            reason: Data("rolling restart".utf8)
+        )
+        adapter.setCloseDetails(peerClose)
+
+        #expect(await connection.state == .closed(peerClose))
+        #expect(await iterator.next() == .closed(peerClose))
+        #expect(await iterator.next() == nil)
+    }
+
     @Test("Peer closure during the handshake fails open with close details")
     func closedDuringHandshake() async {
         let peerClose = WebSocketClose(
@@ -572,6 +627,9 @@ struct URLSessionWebSocketTransportTests {
             eventOnResume: .completed(expected)
         )
         let transport = URLSessionWebSocketTransport(adapter: adapter)
+        var stateIterator = transport.stateStream().makeAsyncIterator()
+
+        #expect(await stateIterator.next() == .open)
 
         do {
             _ = try await transport.open()
@@ -586,6 +644,8 @@ struct URLSessionWebSocketTransportTests {
             Issue.record("Expected a closed transport without peer details")
             return
         }
+        #expect(await stateIterator.next() == .closed(nil))
+        #expect(await stateIterator.next() == nil)
     }
 
     @Test("Rejected upgrades preserve HTTP response metadata")
