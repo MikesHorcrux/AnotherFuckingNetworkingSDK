@@ -408,10 +408,10 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
                 }
                 logger?.log(response: response, data: errorData ?? Data())
                 try Task.checkCancellation()
-                throw NetworkError.requestFailed(
-                    statusCode: httpResponse.statusCode,
+                throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                    response: httpResponse,
                     data: errorData
-                )
+                ))
             }
 
             logger?.log(response: response, data: Data())
@@ -520,10 +520,10 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             throw NetworkError.invalidResponse
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw NetworkError.requestFailed(
-                statusCode: httpResponse.statusCode,
+            throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                response: httpResponse,
                 data: data
-            )
+            ))
         }
 
         return (data, httpResponse)
@@ -573,6 +573,16 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             throw NetworkError.transport(urlError)
         }
         throw NetworkError.unknown(error)
+    }
+
+    private static func makeHTTPFailure(
+        response: HTTPURLResponse,
+        data: Data?
+    ) -> HTTPFailure {
+        HTTPFailure(
+            metadata: HTTPResponseMetadata(response),
+            data: data
+        )
     }
 
     private static func validateDownloadDestination(

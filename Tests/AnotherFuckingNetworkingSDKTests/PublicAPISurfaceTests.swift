@@ -24,7 +24,9 @@ struct PublicAPISurfaceTests {
             (.encodingFailed(underlying), "fixture detail"),
             (.requestConfigurationFailed(underlying), "fixture detail"),
             (.transport(URLError(.timedOut)), "response"),
-            (.requestFailed(statusCode: 429, data: nil), "429"),
+            (.requestFailed(HTTPFailure(
+                metadata: HTTPResponseMetadata(statusCode: 429)
+            )), "429"),
             (.emptyResponse(statusCode: 204), "204"),
             (.decodingFailed(underlying), "fixture detail"),
             (.fileOperationFailed(underlying), "fixture detail"),
@@ -34,6 +36,34 @@ struct PublicAPISurfaceTests {
         for (error, expectedText) in cases {
             #expect(error.localizedDescription.contains(expectedText))
         }
+    }
+
+    @Test("HTTP failures expose stable Sendable response details")
+    func httpFailureDetails() {
+        let body = Data("rate limited".utf8)
+        let finalURL = URL(string: "https://api.example.com/v2/users")!
+        let failure = HTTPFailure(
+            metadata: HTTPResponseMetadata(
+                statusCode: 429,
+                url: finalURL,
+                headers: [
+                    "Retry-After": "15",
+                    "X-Request-ID": "request-1"
+                ]
+            ),
+            data: body
+        )
+
+        requireSendable(failure)
+        #expect(failure.statusCode == 429)
+        #expect(failure.url == finalURL)
+        #expect(failure.headers == [
+            "retry-after": "15",
+            "x-request-id": "request-1"
+        ])
+        #expect(failure.value(forHTTPHeaderField: "RETRY-AFTER") == "15")
+        #expect(failure.data == body)
+        #expect(failure == HTTPFailure(metadata: failure.metadata, data: body))
     }
 
     @Test("Direct and aggregate configuration APIs stay coherent")

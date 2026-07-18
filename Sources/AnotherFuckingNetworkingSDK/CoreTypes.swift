@@ -31,7 +31,7 @@ public enum NetworkError: LocalizedError, Sendable {
     case encodingFailed(any Error)
     case requestConfigurationFailed(any Error)
     case transport(URLError)
-    case requestFailed(statusCode: Int, data: Data?)
+    case requestFailed(HTTPFailure)
     case emptyResponse(statusCode: Int)
     case decodingFailed(any Error)
     case fileOperationFailed(any Error)
@@ -49,8 +49,8 @@ public enum NetworkError: LocalizedError, Sendable {
             return "The URL request could not be configured: \(error.localizedDescription)"
         case .transport(let error):
             return "The request failed before receiving a response: \(error.localizedDescription)"
-        case .requestFailed(let statusCode, _):
-            return "The server returned HTTP \(statusCode)."
+        case .requestFailed(let failure):
+            return "The server returned HTTP \(failure.statusCode)."
         case .emptyResponse(let statusCode):
             return "The server returned an empty HTTP \(statusCode) response."
         case .decodingFailed(let error):
@@ -294,6 +294,32 @@ public struct HTTPResponseMetadata: Equatable, Sendable {
             normalized[name.lowercased()] = headers[name]
         }
         return normalized
+    }
+}
+
+/// The response details retained when an HTTP status is rejected.
+///
+/// ``data`` is the response body when it was available within the operation's
+/// safety limits. In particular, failed downloads omit bodies larger than the
+/// documented limit rather than loading them into memory.
+public struct HTTPFailure: Equatable, Sendable {
+    public let metadata: HTTPResponseMetadata
+    public let data: Data?
+
+    public init(
+        metadata: HTTPResponseMetadata,
+        data: Data? = nil
+    ) {
+        self.metadata = metadata
+        self.data = data
+    }
+
+    public var statusCode: Int { metadata.statusCode }
+    public var url: URL? { metadata.url }
+    public var headers: [String: String] { metadata.headers }
+
+    public func value(forHTTPHeaderField name: String) -> String? {
+        metadata.value(forHTTPHeaderField: name)
     }
 }
 

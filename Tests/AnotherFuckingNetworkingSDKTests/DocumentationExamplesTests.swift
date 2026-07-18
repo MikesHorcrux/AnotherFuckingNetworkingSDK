@@ -360,8 +360,8 @@ private func documentationMessage(for error: NetworkError) -> String {
         return "Request configuration failed"
     case .transport:
         return "Transport failed"
-    case .requestFailed(let statusCode, _):
-        return "HTTP \(statusCode)"
+    case .requestFailed(let failure):
+        return "HTTP \(failure.statusCode)"
     case .emptyResponse(let statusCode):
         return "Empty HTTP \(statusCode)"
     case .decodingFailed:

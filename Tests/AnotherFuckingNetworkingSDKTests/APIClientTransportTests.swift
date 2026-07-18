@@ -351,23 +351,36 @@ struct APIClientTransportTests {
         }
     }
 
-    @Test("Non-2xx responses preserve status and body")
+    @Test("Non-2xx responses preserve metadata and body")
     func statusFailure() async throws {
         let body = Data(#"{"message":"unauthorized"}"#.utf8)
+        let finalURL = URL(string: "https://edge.example.com/v2/users/1")!
         let stub = StubSession { request in
-            .respond(try .http(for: request, statusCode: 401, data: body))
+            .respond(try .http(
+                for: request,
+                responseURL: finalURL,
+                statusCode: 401,
+                headers: [
+                    "Retry-After": "30",
+                    "X-Request-ID": "request-1"
+                ],
+                data: body
+            ))
         }
 
         do {
             _ = try await stub.client().send(GetUserRequest(id: 1))
             Issue.record("Expected a status error")
         } catch let error as NetworkError {
-            guard case .requestFailed(let statusCode, let errorBody) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(statusCode == 401)
-            #expect(errorBody == body)
+            #expect(failure.statusCode == 401)
+            #expect(failure.data == body)
+            #expect(failure.url == finalURL)
+            #expect(failure.value(forHTTPHeaderField: "retry-after") == "30")
+            #expect(failure.value(forHTTPHeaderField: "X-REQUEST-ID") == "request-1")
         }
     }
 
@@ -381,11 +394,11 @@ struct APIClientTransportTests {
             _ = try await stub.client().send(GetUserRequest(id: 1))
             Issue.record("Expected HTTP \(statusCode) to fail")
         } catch let error as NetworkError {
-            guard case .requestFailed(let actual, _) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(actual == statusCode)
+            #expect(failure.statusCode == statusCode)
         }
     }
 

@@ -9,11 +9,12 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
 
         static func http(
             for request: URLRequest,
+            responseURL: URL? = nil,
             statusCode: Int = 200,
             headers: [String: String]? = nil,
             data: Data = Data()
         ) throws -> Self {
-            let url = try #require(request.url)
+            let url = try #require(responseURL ?? request.url)
             let response = try #require(HTTPURLResponse(
                 url: url,
                 statusCode: statusCode,

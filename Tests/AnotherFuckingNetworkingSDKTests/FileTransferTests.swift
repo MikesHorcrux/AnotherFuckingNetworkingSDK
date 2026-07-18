@@ -106,13 +106,16 @@ struct FileTransferTests {
         #expect(transportCalls.withLock { $0 } == 0)
     }
 
-    @Test("Failed uploads preserve HTTP status and response bytes")
+    @Test("Failed uploads preserve HTTP metadata and response bytes")
     func failedUpload() async throws {
         let errorBody = Data(#"{"message":"too large"}"#.utf8)
+        let finalURL = URL(string: "https://uploads.example.com/final")!
         let stub = StubSession { request in
             .respond(try .http(
                 for: request,
+                responseURL: finalURL,
                 statusCode: 413,
+                headers: ["X-Request-ID": "upload-1"],
                 data: errorBody
             ))
         }
@@ -124,12 +127,14 @@ struct FileTransferTests {
             )
             Issue.record("Expected an HTTP failure")
         } catch let error as NetworkError {
-            guard case .requestFailed(let statusCode, let data) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(statusCode == 413)
-            #expect(data == errorBody)
+            #expect(failure.statusCode == 413)
+            #expect(failure.data == errorBody)
+            #expect(failure.url == finalURL)
+            #expect(failure.value(forHTTPHeaderField: "x-request-id") == "upload-1")
         }
     }
 
@@ -321,13 +326,14 @@ struct FileTransferTests {
         #expect(try Data(contentsOf: destinationURL) == replacement)
     }
 
-    @Test("Failed downloads preserve bounded HTTP error bytes")
+    @Test("Failed downloads preserve metadata and bounded HTTP error bytes")
     func failedDownload() async throws {
         let errorBody = Data(#"{"message":"missing"}"#.utf8)
         let ownedDownloadURL = uniqueTemporaryURL()
         try errorBody.write(to: ownedDownloadURL)
         defer { try? FileManager.default.removeItem(at: ownedDownloadURL) }
         let destinationURL = uniqueTemporaryURL()
+        let finalURL = URL(string: "https://downloads.example.com/final")!
         let stub = StubSession { _ in
             .pending(onStart: {}, onStop: {})
         }
@@ -336,7 +342,12 @@ struct FileTransferTests {
                 ownedDownloadURL,
                 try StubURLProtocol.StubResponse.http(
                     for: request,
+                    responseURL: finalURL,
                     statusCode: 404,
+                    headers: [
+                        "Retry-After": "60",
+                        "X-Request-ID": "download-1"
+                    ],
                     data: errorBody
                 ).response
             )
@@ -349,12 +360,15 @@ struct FileTransferTests {
             )
             Issue.record("Expected an HTTP failure")
         } catch let error as NetworkError {
-            guard case .requestFailed(let statusCode, let data) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(statusCode == 404)
-            #expect(data == errorBody)
+            #expect(failure.statusCode == 404)
+            #expect(failure.data == errorBody)
+            #expect(failure.url == finalURL)
+            #expect(failure.value(forHTTPHeaderField: "retry-after") == "60")
+            #expect(failure.value(forHTTPHeaderField: "X-REQUEST-ID") == "download-1")
         }
 
         #expect(!FileManager.default.fileExists(atPath: destinationURL.path))
@@ -427,13 +441,16 @@ struct FileTransferTests {
         #expect(!FileManager.default.fileExists(atPath: ownedDownloadURL.path))
     }
 
-    @Test("Oversized failed downloads do not load error bodies into memory")
+    @Test("Oversized failed downloads preserve metadata without loading bodies")
     func oversizedFailedDownload() async throws {
         let errorBody = Data(repeating: 0x41, count: 1_048_577)
+        let finalURL = URL(string: "https://downloads.example.com/oversized")!
         let stub = StubSession { request in
             .respond(try .http(
                 for: request,
+                responseURL: finalURL,
                 statusCode: 500,
+                headers: ["X-Request-ID": "download-large"],
                 data: errorBody
             ))
         }
@@ -442,12 +459,14 @@ struct FileTransferTests {
             _ = try await stub.client().download(DownloadFixtureRequest())
             Issue.record("Expected an HTTP failure")
         } catch let error as NetworkError {
-            guard case .requestFailed(let statusCode, let data) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(statusCode == 500)
-            #expect(data == nil)
+            #expect(failure.statusCode == 500)
+            #expect(failure.data == nil)
+            #expect(failure.url == finalURL)
+            #expect(failure.value(forHTTPHeaderField: "X-Request-ID") == "download-large")
         }
     }
 
