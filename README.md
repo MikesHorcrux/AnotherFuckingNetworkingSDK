@@ -556,7 +556,9 @@ The operation closure resolves `requestKey` and bridges to
 bounded resume data at each checkpoint. The adapter translates Foundation
 delegate callbacks and invokes the app's completion handler only after
 `backgroundEventsFinished`; request resolution, auth, and destination commits
-remain application policy. See [Background and resumable transfers](docs/background-transfers.md).
+remain application policy. Pass a durable job ID when creating a task and use
+`transferTasks()` after relaunch to rebuild task-to-job routing. See
+[Background and resumable transfers](docs/background-transfers.md).
 
 ## WebSockets
 

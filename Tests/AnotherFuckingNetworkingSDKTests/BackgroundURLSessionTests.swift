@@ -17,6 +17,25 @@ struct BackgroundURLSessionTests {
         )
 
         #expect(event == .metrics(taskIdentifier: 7, snapshot: snapshot))
+        #expect(event.taskIdentifier == 7)
+        #expect(!event.isTerminal)
+        #expect(BackgroundTransferEvent.backgroundEventsFinished.taskIdentifier == nil)
+        #expect(BackgroundTransferEvent.backgroundEventsFinished.isTerminal)
+    }
+
+    @Test("Background task descriptors preserve relaunch identity")
+    func taskDescriptorPreservesIdentity() {
+        let jobID = UUID()
+        let descriptor = BackgroundTransferTaskDescriptor(
+            taskIdentifier: 42,
+            jobID: jobID,
+            originalURL: URL(string: "https://example.com/export")!,
+            isDownload: true
+        )
+
+        #expect(descriptor.taskIdentifier == 42)
+        #expect(descriptor.jobID == jobID)
+        #expect(descriptor.isDownload)
     }
 
     @Test("Background completion is delivered after the terminal event")
