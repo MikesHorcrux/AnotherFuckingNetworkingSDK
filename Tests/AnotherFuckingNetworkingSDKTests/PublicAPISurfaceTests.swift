@@ -27,6 +27,7 @@ struct PublicAPISurfaceTests {
             (.requestFailed(statusCode: 429, data: nil), "429"),
             (.emptyResponse(statusCode: 204), "204"),
             (.decodingFailed(underlying), "fixture detail"),
+            (.fileOperationFailed(underlying), "fixture detail"),
             (.unknown(underlying), "fixture detail")
         ]
 
