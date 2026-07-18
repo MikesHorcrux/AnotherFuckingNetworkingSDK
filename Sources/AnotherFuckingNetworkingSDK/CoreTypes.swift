@@ -2,110 +2,179 @@ import Foundation
 
 // MARK: - HTTPMethod
 
-/// Because who doesn't love enumerating?
-public enum HTTPMethod: String {
-    case get    = "GET"
-    case post   = "POST"
-    case put    = "PUT"
+/// An HTTP request method.
+public enum HTTPMethod: String, CaseIterable, Sendable {
+    case get = "GET"
+    case head = "HEAD"
+    case post = "POST"
+    case put = "PUT"
+    case patch = "PATCH"
     case delete = "DELETE"
-    // add more (PATCH, HEAD, OPTIONS...) if your API needs them
+    case options = "OPTIONS"
 }
 
 // MARK: - NetworkError
 
-/// A robust representation of the bullshit that can go wrong.
-public enum NetworkError: LocalizedError {
+/// An error produced while constructing, sending, or decoding a network request.
+public enum NetworkError: LocalizedError, Sendable {
     case invalidURL
+    case invalidResponse
+    case encodingFailed(any Error)
+    case transport(URLError)
     case requestFailed(statusCode: Int, data: Data?)
-    case decodingFailed(Error)
-    case unknown(Error)
+    case emptyResponse(statusCode: Int)
+    case decodingFailed(any Error)
+    case unknown(any Error)
 
     public var errorDescription: String? {
         switch self {
         case .invalidURL:
-            return "Fucked up: invalid URL."
+            return "The request URL could not be constructed."
+        case .invalidResponse:
+            return "The server returned a non-HTTP response."
+        case .encodingFailed(let error):
+            return "The request body could not be encoded: \(error.localizedDescription)"
+        case .transport(let error):
+            return "The request failed before receiving a response: \(error.localizedDescription)"
         case .requestFailed(let statusCode, _):
-            return "Fucked up: HTTP \(statusCode) returned."
+            return "The server returned HTTP \(statusCode)."
+        case .emptyResponse(let statusCode):
+            return "The server returned an empty HTTP \(statusCode) response."
         case .decodingFailed(let error):
-            return "Fucked up: couldn't decode JSON. (\(error.localizedDescription))"
+            return "The response could not be decoded: \(error.localizedDescription)"
         case .unknown(let error):
-            return "Fucked up: unknown error. (\(error.localizedDescription))"
+            return "The request failed unexpectedly: \(error.localizedDescription)"
         }
     }
 }
 
 // MARK: - Request
 
-/// The blueprint for your networking calls.
-/// Supply the path, method, query items, body, etc.
-public protocol Request {
-    associatedtype ReturnType: Decodable
-    
-    /// e.g. "users", "posts/1", etc.
+/// A type-safe description of an HTTP request and its decoded response.
+public protocol Request: Sendable {
+    associatedtype ReturnType: Decodable & Sendable
+
+    /// The endpoint path relative to the client's base URL.
     var path: String { get }
-    
-    /// GET, POST, etc. Default: .get
+
+    /// The HTTP method. The default is ``HTTPMethod/get``.
     var method: HTTPMethod { get }
-    
-    /// `?foo=bar` stuff. Default: nil.
+
+    /// Query items appended after any query items already present in the base URL.
     var queryItems: [URLQueryItem]? { get }
-    
-    /// Request body for POST/PUT. Default: nil.
+
+    /// A pre-encoded request body.
+    ///
+    /// Requests that need the client's configured encoder should implement
+    /// ``makeBody(using:)`` instead.
     var body: Data? { get }
-    
-    /// Optional custom headers for this request. Default: nil.
+
+    /// Headers applied to this request. They override matching client headers
+    /// case-insensitively.
     var headers: [String: String]? { get }
-    
-    /// Build the final URL from a baseURL (which we store in the client).
+
+    /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
+
+    /// Builds the body using a fresh encoder from the client configuration.
+    func makeBody(using encoder: JSONEncoder) throws -> Data?
+
+    /// Decodes a successful response using a fresh decoder from the client configuration.
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> ReturnType
 }
 
-// MARK: Defaults
 public extension Request {
     var method: HTTPMethod { .get }
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
-    
+
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return nil
         }
-        // tack on your path
-        components.path = components.path + "/" + path
-        
-        // tack on any query items
-        if let queryItems = queryItems, !queryItems.isEmpty {
-            if components.queryItems == nil {
-                components.queryItems = queryItems
-            } else {
-                components.queryItems?.append(contentsOf: queryItems)
-            }
+
+        let basePath = components.path.trimmingCharacters(in: Self.pathSeparators)
+        let endpointPath = path.trimmingCharacters(in: Self.pathSeparators)
+        let joinedPath = [basePath, endpointPath]
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
+
+        components.path = joinedPath.isEmpty ? "" : "/\(joinedPath)"
+
+        if let queryItems, !queryItems.isEmpty {
+            components.queryItems = (components.queryItems ?? []) + queryItems
         }
+
         return components.url
+    }
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        body
+    }
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> ReturnType {
+        try decoder.decode(ReturnType.self, from: data)
+    }
+
+    private static var pathSeparators: CharacterSet {
+        CharacterSet(charactersIn: "/")
     }
 }
 
-// MARK: - PaginatedRequest
+// MARK: - EmptyResponse
 
-/// If your request needs pagination, conform to this puppy.
-public protocol PaginatedRequest: Request {
-    /// Current page index or next-page token.
-    var page: Int { get }
-    /// Page size or limit. Adjust for your API.
-    var pageSize: Int { get }
+/// A successful response that intentionally carries no body.
+public struct EmptyResponse: Decodable, Equatable, Sendable {
+    public init() {}
+
+    public init(from decoder: any Decoder) throws {
+        self.init()
+    }
 }
 
-// MARK: - PaginatedResponse
+// MARK: - Pagination
 
-/// Because APIs love sending back big lists in chunks.
-public struct PaginatedResponse<T: Decodable>: Decodable {
+/// A page-number-based request.
+public protocol PaginatedRequest: Request {
+    var page: Int { get }
+    var pageSize: Int { get }
+
+    /// The query name used for ``page``. The default is `page`.
+    var pageQueryName: String { get }
+
+    /// The query name used for ``pageSize``. The default is `pageSize`.
+    var pageSizeQueryName: String { get }
+}
+
+public extension PaginatedRequest {
+    var pageQueryName: String { "page" }
+    var pageSizeQueryName: String { "pageSize" }
+}
+
+/// A decoded page of response items.
+public struct PaginatedResponse<T: Decodable & Sendable>: Decodable, Sendable {
     public let items: [T]
     public let currentPage: Int
     public let totalPages: Int
 
-    /// Example logic: if current < total, next is current+1
+    public init(items: [T], currentPage: Int, totalPages: Int) {
+        self.items = items
+        self.currentPage = currentPage
+        self.totalPages = totalPages
+    }
+
     public var nextPage: Int? {
         currentPage < totalPages ? currentPage + 1 : nil
     }
-} 
+}
+
+extension PaginatedResponse: Equatable where T: Equatable {}
