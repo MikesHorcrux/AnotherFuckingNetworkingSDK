@@ -137,6 +137,391 @@ public struct HTTPStatusPolicy: Equatable, Sendable {
     }
 }
 
+// MARK: - HTTPRetryPolicy
+
+/// Defines whether and when a failed HTTP attempt may be replayed.
+///
+/// Policies are immutable values. ``never`` is the default for every request,
+/// so retries are always an explicit endpoint decision.
+public struct HTTPRetryPolicy: Equatable, Sendable {
+    /// Controls which final HTTP methods a policy may replay.
+    public enum ReplaySafety: Equatable, Sendable {
+        /// Replays only `GET`, `HEAD`, `PUT`, `DELETE`, and `OPTIONS`.
+        case idempotentMethodsOnly
+
+        /// The request author asserts that every attempt is safe to replay.
+        ///
+        /// Use this for non-idempotent methods only when the endpoint supplies
+        /// an idempotency mechanism or otherwise guarantees replay safety.
+        case explicitlyReplayable
+    }
+
+    /// Randomization applied to exponential backoff delays.
+    public enum Jitter: Equatable, Sendable {
+        /// Uses the computed exponential delay exactly.
+        case none
+
+        /// Chooses a random delay from zero through the computed delay.
+        case full
+    }
+
+    /// Never retries a failed attempt.
+    public static let never = Self(storage: .never)
+
+    /// The transient response statuses used by ``transient(maximumAttempts:initialDelay:maximumDelay:multiplier:jitter:honorsRetryAfter:retryableStatusCodes:retryableURLErrorCodes:replaySafety:)``.
+    public static let defaultRetryableStatusCodes = HTTPStatusPolicy.codes([
+        408,
+        429,
+        500,
+        502,
+        503,
+        504
+    ])
+
+    /// The transient URL failures used by ``transient(maximumAttempts:initialDelay:maximumDelay:multiplier:jitter:honorsRetryAfter:retryableStatusCodes:retryableURLErrorCodes:replaySafety:)``.
+    public static let defaultRetryableURLErrorCodes: Set<URLError.Code> = [
+        .timedOut,
+        .cannotFindHost,
+        .cannotConnectToHost,
+        .dnsLookupFailed,
+        .networkConnectionLost,
+        .notConnectedToInternet
+    ]
+
+    private static let maximumAttemptLimit = 100
+
+    private struct TransientConfiguration: Equatable, Sendable {
+        let maximumAttempts: Int
+        let initialDelayNanoseconds: UInt64
+        let maximumDelayNanoseconds: UInt64
+        let multiplier: Double
+        let jitter: Jitter
+        let honorsRetryAfter: Bool
+        let retryableStatusCodes: HTTPStatusPolicy
+        let retryableURLErrorCodes: Set<URLError.Code>
+        let replaySafety: ReplaySafety
+    }
+
+    private enum Storage: Equatable, Sendable {
+        case never
+        case transient(TransientConfiguration)
+    }
+
+    private let storage: Storage
+
+    /// Creates a bounded policy for common transient HTTP and URL failures.
+    ///
+    /// `maximumAttempts` includes the initial attempt. Values less than two
+    /// create ``never`` and values above `100` are capped to prevent accidental
+    /// zero-delay retry loops. Negative or `NaN` delays become zero, positive
+    /// infinity saturates, the initial delay is capped to the maximum delay,
+    /// and a non-finite or sub-one multiplier becomes `1`.
+    ///
+    /// A valid `Retry-After` delta or HTTP date takes precedence over
+    /// exponential backoff. If the server asks for longer than `maximumDelay`,
+    /// the failure is returned immediately instead of retrying too early.
+    public static func transient(
+        maximumAttempts: Int = 3,
+        initialDelay: TimeInterval = 0.25,
+        maximumDelay: TimeInterval = 10,
+        multiplier: Double = 2,
+        jitter: Jitter = .full,
+        honorsRetryAfter: Bool = true,
+        retryableStatusCodes: HTTPStatusPolicy =
+            HTTPRetryPolicy.defaultRetryableStatusCodes,
+        retryableURLErrorCodes: Set<URLError.Code> =
+            HTTPRetryPolicy.defaultRetryableURLErrorCodes,
+        replaySafety: ReplaySafety = .idempotentMethodsOnly
+    ) -> Self {
+        guard maximumAttempts > 1,
+              retryableStatusCodes != .none
+                || !retryableURLErrorCodes.isEmpty else {
+            return .never
+        }
+
+        let maximumDelayNanoseconds = nanoseconds(for: maximumDelay)
+        let initialDelayNanoseconds = min(
+            nanoseconds(for: initialDelay),
+            maximumDelayNanoseconds
+        )
+        let normalizedMultiplier = multiplier.isFinite && multiplier >= 1
+            ? multiplier
+            : 1
+
+        return Self(storage: .transient(TransientConfiguration(
+            maximumAttempts: min(maximumAttempts, maximumAttemptLimit),
+            initialDelayNanoseconds: initialDelayNanoseconds,
+            maximumDelayNanoseconds: maximumDelayNanoseconds,
+            multiplier: normalizedMultiplier,
+            jitter: jitter,
+            honorsRetryAfter: honorsRetryAfter,
+            retryableStatusCodes: retryableStatusCodes,
+            retryableURLErrorCodes: retryableURLErrorCodes,
+            replaySafety: replaySafety
+        )))
+    }
+
+    private init(storage: Storage) {
+        self.storage = storage
+    }
+
+    var isNever: Bool {
+        if case .never = storage { return true }
+        return false
+    }
+
+    func retryDelayNanoseconds(
+        afterAttempt attempt: Int,
+        method: String,
+        failure: HTTPRetryFailure,
+        now: Date,
+        randomUnitValue: Double
+    ) -> UInt64? {
+        guard case .transient(let configuration) = storage,
+              attempt > 0,
+              attempt < configuration.maximumAttempts,
+              Self.canReplay(
+                method: method,
+                safety: configuration.replaySafety
+              ) else {
+            return nil
+        }
+
+        switch failure {
+        case .transport(let error):
+            guard configuration.retryableURLErrorCodes.contains(error.code) else {
+                return nil
+            }
+
+        case .response(let failure):
+            guard configuration.retryableStatusCodes.accepts(
+                failure.statusCode
+            ) else {
+                return nil
+            }
+            if configuration.honorsRetryAfter,
+               let value = failure.value(forHTTPHeaderField: "Retry-After") {
+                let referenceDate = failure.value(forHTTPHeaderField: "Date")
+                    .flatMap {
+                        Self.retryAfterDate(from: $0, referenceDate: now)
+                    } ?? now
+                if let delay = Self.retryAfterDelayNanoseconds(
+                    value,
+                    referenceDate: referenceDate,
+                    maximum: configuration.maximumDelayNanoseconds
+                ) {
+                    return delay
+                }
+                if Self.isValidRetryAfter(
+                    value,
+                    referenceDate: referenceDate
+                ) {
+                    // A syntactically valid value above the configured maximum
+                    // is an instruction not to retry earlier than the server
+                    // asked.
+                    return nil
+                }
+            }
+        }
+
+        let delay = Self.exponentialDelayNanoseconds(
+            afterAttempt: attempt,
+            configuration: configuration
+        )
+        guard configuration.jitter == .full else { return delay }
+
+        let sample = randomUnitValue.isFinite
+            ? min(max(randomUnitValue, 0), 1)
+            : 0
+        return Self.clampedNanoseconds(
+            from: Double(delay) * sample,
+            maximum: delay
+        )
+    }
+
+    private static func canReplay(
+        method: String,
+        safety: ReplaySafety
+    ) -> Bool {
+        guard safety == .idempotentMethodsOnly else { return true }
+        switch method {
+        case "GET", "HEAD", "PUT", "DELETE", "OPTIONS":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func exponentialDelayNanoseconds(
+        afterAttempt attempt: Int,
+        configuration: TransientConfiguration
+    ) -> UInt64 {
+        guard configuration.initialDelayNanoseconds > 0,
+              configuration.maximumDelayNanoseconds > 0 else {
+            return 0
+        }
+
+        let exponent = Double(max(0, attempt - 1))
+        let scaled = Double(configuration.initialDelayNanoseconds)
+            * pow(configuration.multiplier, exponent)
+        guard scaled.isFinite else {
+            return configuration.maximumDelayNanoseconds
+        }
+        return clampedNanoseconds(
+            from: scaled,
+            maximum: configuration.maximumDelayNanoseconds
+        )
+    }
+
+    private static func retryAfterDelayNanoseconds(
+        _ value: String,
+        referenceDate: Date,
+        maximum: UInt64
+    ) -> UInt64? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let delay: UInt64
+
+        if isASCIIDecimal(trimmed) {
+            guard let seconds = UInt64(trimmed),
+                  seconds <= maximum / 1_000_000_000 else {
+                return nil
+            }
+            delay = seconds * 1_000_000_000
+        } else if let date = retryAfterDate(
+            from: trimmed,
+            referenceDate: referenceDate
+        ) {
+            let interval = max(0, date.timeIntervalSince(referenceDate))
+            delay = nanoseconds(for: interval)
+        } else {
+            return nil
+        }
+
+        guard delay <= maximum else { return nil }
+        return delay
+    }
+
+    private static func isValidRetryAfter(
+        _ value: String,
+        referenceDate: Date
+    ) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isASCIIDecimal(trimmed) { return true }
+        return retryAfterDate(
+            from: trimmed,
+            referenceDate: referenceDate
+        ) != nil
+    }
+
+    private static func isASCIIDecimal(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { byte in
+            byte >= 48 && byte <= 57
+        }
+    }
+
+    private static func retryAfterDate(
+        from value: String,
+        referenceDate: Date
+    ) -> Date? {
+        let formats = [
+            ("EEE',' dd MMM yyyy HH':'mm':'ss zzz", false),
+            ("EEEE',' dd-MMM-yy HH':'mm':'ss zzz", true),
+            ("EEE MMM d HH':'mm':'ss yyyy", false)
+        ]
+
+        for (format, usesTwoDigitYear) in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            formatter.isLenient = false
+            if let date = formatter.date(from: value) {
+                guard usesTwoDigitYear else { return date }
+                return adjustedRFC850Date(
+                    date,
+                    value: value,
+                    referenceDate: referenceDate
+                )
+            }
+        }
+        return nil
+    }
+
+    private static func adjustedRFC850Date(
+        _ parsedDate: Date,
+        value: String,
+        referenceDate: Date
+    ) -> Date? {
+        guard let comma = value.firstIndex(of: ",") else { return nil }
+        let fields = value[value.index(after: comma)...]
+            .split(whereSeparator: { $0.isWhitespace })
+        guard let dateField = fields.first,
+              let yearField = dateField.split(separator: "-").last,
+              yearField.count == 2,
+              let shortYear = Int(yearField) else {
+            return nil
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        guard let referenceYear = calendar.dateComponents(
+            [.year],
+            from: referenceDate
+        ).year else {
+            return nil
+        }
+
+        var components = calendar.dateComponents(
+            [.month, .day, .hour, .minute, .second],
+            from: parsedDate
+        )
+        components.year = (referenceYear / 100) * 100 + shortYear
+        guard var candidate = calendar.date(from: components),
+              let fiftyYearsFromReference = calendar.date(
+                byAdding: .year,
+                value: 50,
+                to: referenceDate
+              ) else {
+            return nil
+        }
+        if candidate > fiftyYearsFromReference {
+            guard let adjusted = calendar.date(
+                byAdding: .year,
+                value: -100,
+                to: candidate
+            ) else {
+                return nil
+            }
+            candidate = adjusted
+        }
+        return candidate
+    }
+
+    private static func nanoseconds(for interval: TimeInterval) -> UInt64 {
+        if interval == .infinity { return UInt64.max }
+        guard interval.isFinite, interval > 0 else { return 0 }
+        let scaled = interval * 1_000_000_000
+        guard scaled < Double(UInt64.max) else { return UInt64.max }
+        return UInt64(scaled.rounded(.towardZero))
+    }
+
+    private static func clampedNanoseconds(
+        from value: Double,
+        maximum: UInt64
+    ) -> UInt64 {
+        guard value.isFinite, value > 0 else { return 0 }
+        guard value < Double(maximum) else { return maximum }
+        return UInt64(value.rounded(.towardZero))
+    }
+
+}
+
+enum HTTPRetryFailure: Sendable {
+    case transport(URLError)
+    case response(HTTPFailure)
+}
+
 // MARK: - NetworkError
 
 /// An error produced while constructing, sending, or decoding a network request.
@@ -208,6 +593,9 @@ public protocol HTTPRequest: Sendable {
     /// ``HTTPStatusPolicy/successful``.
     var acceptedStatusCodes: HTTPStatusPolicy { get }
 
+    /// The failed-attempt replay policy. The default is ``HTTPRetryPolicy/never``.
+    var retryPolicy: HTTPRetryPolicy { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -229,6 +617,7 @@ public extension HTTPRequest {
     var body: Data? { nil }
     var headers: [String: String]? { nil }
     var acceptedStatusCodes: HTTPStatusPolicy { .successful }
+    var retryPolicy: HTTPRetryPolicy { .never }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
