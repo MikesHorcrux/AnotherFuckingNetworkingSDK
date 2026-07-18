@@ -167,9 +167,17 @@ private enum FileIOFixtureError: Error, Equatable, Sendable {
 private func waitUntil(
     _ condition: @Sendable () -> Bool
 ) async {
-    for _ in 0..<1_000 {
+    // CI runners can be busy enough that a cooperative-yield-only loop never
+    // gives the dedicated Dispatch queue a scheduling turn. Keep the wait
+    // bounded, but include short suspension intervals for deterministic queue
+    // progress across local and hosted macOS toolchains.
+    for iteration in 0..<20_000 {
         if condition() { return }
-        await Task.yield()
+        if iteration.isMultiple(of: 100) {
+            try? await Task.sleep(nanoseconds: 100_000)
+        } else {
+            await Task.yield()
+        }
     }
     Issue.record("Timed out waiting for queued file I/O")
 }
