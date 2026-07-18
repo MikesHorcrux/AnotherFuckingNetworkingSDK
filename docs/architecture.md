@@ -111,6 +111,9 @@ Policies are values or wrappers, not hidden global switches:
 - WebSocketMessageCodec adds an opt-in typed value seam over complete text or
   binary messages. Its decoded sequence delegates to the existing bounded FIFO
   and never creates a second receive pump.
+- RequestConcurrencyLimiter is an actor-isolated FIFO permit policy for
+  complete response operations. The response decorator does not claim stream
+  or transfer conformance because those resources outlive the method call.
 - ServerSentEventStream is a bounded framing adapter over HTTPByteStream;
   status/retry decisions stay in the HTTP layer while event parsing remains
   single-pass and cancellation-owned by the consumer.
