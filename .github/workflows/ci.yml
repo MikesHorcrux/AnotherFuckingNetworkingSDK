@@ -25,6 +25,13 @@ jobs:
         run: swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
       - name: Release tests with strict concurrency
         run: swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: Forward Swift 6 isolation build
+        run: |
+          swift build \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors \
+            -Xswiftc -enable-upcoming-feature \
+            -Xswiftc NonisolatedNonsendingByDefault
       - name: Parseable library-evolution interfaces
         run: |
           swift build -c release \
@@ -46,6 +53,26 @@ jobs:
           xcodebuild -quiet \
             -scheme AnotherFuckingNetworkingSDKTesting \
             -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            build
+      - name: macOS 12 product builds
+        run: |
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDK \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            build
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDKTesting \
+            -destination 'generic/platform=macOS' \
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
