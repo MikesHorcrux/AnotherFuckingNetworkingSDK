@@ -662,6 +662,11 @@ Resume data is bounded before it leaves the adapter. Missing task IDs and
 attempts to pause an upload throw `BackgroundTransferTaskControlError`, so a
 relaunch race is observable and can be reconciled against the durable job.
 
+Before persisting resume data from a database or relaunch callback, use
+`BackgroundTransferResumeDataValidator`. Its default `.bounded` mode enforces
+the non-empty and 8 MiB contract without depending on Foundation's opaque
+format; `.propertyList` is an opt-in integrity check for current payloads.
+
 For a single durable callback path, compose the router and coordinator with
 `BackgroundTransferLifecycleCoordinator`. It starts restored jobs when the
 first delegate callback arrives, persists monotonic progress, and refuses to

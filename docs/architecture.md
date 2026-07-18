@@ -101,6 +101,9 @@ Policies are values or wrappers, not hidden global switches:
 - BackgroundTransferTaskControlError and the adapter's async pause/cancel/
   resume methods make relaunch races explicit while keeping bounded resume data
   and durable job transitions in separate ownership domains.
+- BackgroundTransferResumeDataValidator provides bounded validation with an
+  opt-in property-list integrity check; the default remains format-agnostic so
+  future Foundation resume-data formats are not rejected by the SDK.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 - WebSocketRecoveryAdapter composes an application-owned cursor/session
   protocol with bounded actor-isolated in-memory or atomic JSON state without
