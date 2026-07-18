@@ -173,6 +173,37 @@ struct DocumentationExamplesTests {
         #expect(HTTPStatusPolicy(200...299, 304...304).accepts(304))
     }
 
+    @Test("Replay-safe retry examples compile and run")
+    func retries() async throws {
+        let calls = LockedBox(0)
+        let stub = StubSession { request in
+            let attempt = calls.withLock { calls in
+                calls += 1
+                return calls
+            }
+            if attempt == 1 {
+                return .respond(try .http(for: request, statusCode: 503))
+            }
+            return .respond(try .http(
+                for: request,
+                data: Data(#"{"id":"annual"}"#.utf8)
+            ))
+        }
+        let client = stub.client(retrySleeper: { _ in })
+
+        let report = try await client.send(
+            DocumentationFetchReportRequest(reportID: "annual")
+        )
+        let payment = DocumentationCreatePaymentRequest(
+            idempotencyKey: "payment-42"
+        )
+
+        #expect(report == DocumentationReport(id: "annual"))
+        #expect(calls.withLock { $0 } == 2)
+        #expect(payment.retryPolicy != .never)
+        #expect(payment.headers?["Idempotency-Key"] == "payment-42")
+    }
+
     @Test("Upload and download examples compile through the transfer protocol")
     func fileTransfers() async throws {
         let stub = StubSession { request in
@@ -434,6 +465,38 @@ private struct DocumentationCreateOrReturnUserRequest: Request {
     let path = "users"
     let method = HTTPMethod.post
     let acceptedStatusCodes = HTTPStatusPolicy(200...299, 409...409)
+}
+
+private struct DocumentationReport: Codable, Equatable, Sendable {
+    let id: String
+}
+
+private struct DocumentationFetchReportRequest: Request {
+    typealias ReturnType = DocumentationReport
+
+    let reportID: String
+    var path: String { "reports/\(reportID)" }
+    let retryPolicy = HTTPRetryPolicy.transient(
+        maximumAttempts: 3,
+        initialDelay: 0.25,
+        maximumDelay: 10,
+        multiplier: 2,
+        jitter: .full
+    )
+}
+
+private struct DocumentationCreatePaymentRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let idempotencyKey: String
+    let path = "payments"
+    let method = HTTPMethod.post
+    var headers: [String: String]? {
+        ["Idempotency-Key": idempotencyKey]
+    }
+    let retryPolicy = HTTPRetryPolicy.transient(
+        replaySafety: .explicitlyReplayable
+    )
 }
 
 private struct DocumentationListUsersRequest: PaginatedRequest {
