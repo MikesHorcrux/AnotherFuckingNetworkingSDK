@@ -38,6 +38,33 @@ struct BackgroundURLSessionTests {
         #expect(descriptor.isDownload)
     }
 
+    @Test("Background identity round-trips through durable JSON")
+    func backgroundIdentityRoundTrips() throws {
+        let jobID = UUID()
+        let descriptor = BackgroundTransferTaskDescriptor(
+            taskIdentifier: 42,
+            jobID: jobID,
+            originalURL: URL(string: "https://example.com/export")!,
+            isDownload: true
+        )
+        let route = BackgroundTransferRoute(
+            taskIdentifier: descriptor.taskIdentifier,
+            jobID: jobID,
+            kind: .download
+        )
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        #expect(try decoder.decode(
+            BackgroundTransferTaskDescriptor.self,
+            from: encoder.encode(descriptor)
+        ) == descriptor)
+        #expect(try decoder.decode(
+            BackgroundTransferRoute.self,
+            from: encoder.encode(route)
+        ) == route)
+    }
+
     @Test("Background events route through actor-isolated durable bindings")
     func eventRouterRoutesAndReconciles() async throws {
         let jobID = UUID()

@@ -6,7 +6,7 @@ import Foundation
 /// Task identifiers are only meaningful within their URLSession. Persist the
 /// durable job separately and rebuild these routes from
 /// ``BackgroundTransferTaskDescriptor`` values after relaunch.
-public struct BackgroundTransferRoute: Equatable, Sendable {
+public struct BackgroundTransferRoute: Codable, Equatable, Sendable {
     public let taskIdentifier: Int
     public let jobID: UUID
     public let kind: TransferJobKind
