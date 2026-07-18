@@ -370,6 +370,108 @@ struct MockAPIClientTests {
         #expect(records.map(\.sequenceID).sorted() == Array(0..<100))
         #expect(Set(records.map(\.path)).count == 100)
     }
+
+    @Test("Compatibility aliases remain actor-safe and observable")
+    func compatibilityAliases() async throws {
+        let mock = MockAPIClient()
+        let ordinary = TestUser(id: 1, displayName: "Ordinary")
+        let page = PaginatedResponse(
+            items: [TestUser(id: 2, displayName: "Page")],
+            currentPage: 2,
+            totalPages: 3
+        )
+        await mock.mock(GetUserRequest.self, with: ordinary)
+        await mock.mock(MockPageRequest.self, with: page)
+
+        #expect(try await mock.send(GetUserRequest(id: 1)) == ordinary)
+        #expect(try await mock.sendPage(
+            MockPageRequest(page: 2, pageSize: 20, filter: "active")
+        ) == page)
+        #expect(await mock.calledRequests == ["users/1", "users?page=2"])
+
+        await mock.resetMocks()
+        #expect(await mock.recordedRequests.isEmpty)
+    }
+
+    @Test("Exact compatibility aliases and exact page errors still work")
+    func exactCompatibilityAliases() async throws {
+        let mock = MockAPIClient()
+        let request = GetUserRequest(id: 1)
+        let pageRequest = MockPageRequest(page: 2, pageSize: 20, filter: "active")
+        try await mock.mock(
+            request,
+            with: TestUser(id: 1, displayName: "Exact")
+        )
+        try await mock.mockError(
+            GetUserRequest(id: 2),
+            with: MockFixtureError.exact
+        )
+        try await mock.stubPageError(
+            pageRequest,
+            error: MockFixtureError.typeDefault
+        )
+
+        #expect(try await mock.send(request).displayName == "Exact")
+        await #expect(throws: MockFixtureError.exact) {
+            try await mock.send(GetUserRequest(id: 2))
+        }
+        await #expect(throws: MockFixtureError.typeDefault) {
+            try await mock.sendPage(pageRequest)
+        }
+    }
+
+    @Test("Request construction failures remain typed in registration and sends")
+    func requestConstructionFailures() async throws {
+        let mock = MockAPIClient()
+
+        do {
+            try await mock.stub(
+                InvalidMockURLRequest(),
+                with: EmptyResponse()
+            )
+            Issue.record("Expected exact registration to reject the URL")
+        } catch let error as NetworkError {
+            guard case .invalidURL = error else {
+                Issue.record("Expected invalidURL, got \(error)")
+                return
+            }
+        }
+
+        await mock.stub(FailingMockEncodingRequest.self, with: EmptyResponse())
+        do {
+            _ = try await mock.send(FailingMockEncodingRequest())
+            Issue.record("Expected mock body encoding to fail")
+        } catch let error as NetworkError {
+            guard case .encodingFailed(let underlying) = error else {
+                Issue.record("Expected encodingFailed, got \(error)")
+                return
+            }
+            #expect(underlying is MockFixtureError)
+        }
+
+        do {
+            try await mock.stub(
+                CancellingMockEncodingRequest(),
+                with: EmptyResponse()
+            )
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
+    @Test("Missing-stub diagnostics are localized")
+    func localizedDiagnostics() async throws {
+        let mock = MockAPIClient()
+
+        do {
+            _ = try await mock.send(GetUserRequest(id: 404))
+            Issue.record("Expected a missing stub")
+        } catch let error as MockAPIClientError {
+            #expect(error.localizedDescription.contains("No request stub"))
+            #expect(error.localizedDescription.contains("users/404"))
+        }
+    }
 }
 
 private struct MockUserService: Sendable {
@@ -453,6 +555,26 @@ private struct FailingMockEncodingRequest: Request {
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         throw MockFixtureError.exact
+    }
+}
+
+private struct InvalidMockURLRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "invalid"
+
+    func makeURL(baseURL: URL) -> URL? {
+        nil
+    }
+}
+
+private struct CancellingMockEncodingRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "cancelling-encoding"
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        throw CancellationError()
     }
 }
 
