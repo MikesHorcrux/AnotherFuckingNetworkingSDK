@@ -318,7 +318,7 @@ public struct StreamingMultipartFormData: Hashable, Sendable {
     private var parts: [Part] = []
 
     public init() {
-        boundary = "AFNSDK-STREAM-(UUID().uuidString)"
+        boundary = "AFNSDK-STREAM-\(UUID().uuidString)"
     }
 
     public init(boundary: String) throws {

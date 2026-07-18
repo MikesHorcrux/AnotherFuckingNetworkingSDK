@@ -4,6 +4,17 @@ import Testing
 
 @Suite("Streaming multipart form data")
 struct StreamingMultipartTests {
+    @Test("Default boundaries are unique UUID-based values")
+    func defaultBoundaryIsUnique() {
+        let first = StreamingMultipartFormData()
+        let second = StreamingMultipartFormData()
+
+        #expect(first.boundary.hasPrefix("AFNSDK-STREAM-"))
+        #expect(first.boundary != "AFNSDK-STREAM-(UUID().uuidString)")
+        #expect(first.boundary != second.boundary)
+        #expect(first.boundary.count == "AFNSDK-STREAM-".count + 36)
+    }
+
     @Test("File-backed parts are written without materializing the source")
     func writesFileBackedParts() throws {
         let directory = FileManager.default.temporaryDirectory
