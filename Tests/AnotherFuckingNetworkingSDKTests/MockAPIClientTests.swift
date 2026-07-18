@@ -327,7 +327,7 @@ struct MockAPIClientTests {
         let started = AsyncSignal()
         let mock = MockAPIClient(delay: 60) { _ in
             await started.signal()
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(nanoseconds: 5_000_000_000)
         }
         await mock.stub(
             GetUserRequest.self,
