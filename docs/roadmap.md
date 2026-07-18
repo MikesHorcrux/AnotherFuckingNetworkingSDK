@@ -32,8 +32,9 @@ roadmap item is not a shipped feature.
 3. **Streaming multipart** — file-backed parts and bounded encoding.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
    adapters and oldest-target integration coverage.
-5. **Caching and request coalescing** — conditional requests and explicit cache
-   policy, without imposing application-wide cache semantics.
+5. **Caching** — conditional requests and explicit cache policy, without
+   imposing application-wide cache semantics. Request coalescing is shipped as
+   an opt-in single-flight decorator.
 6. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
    Catalyst evaluation.
 

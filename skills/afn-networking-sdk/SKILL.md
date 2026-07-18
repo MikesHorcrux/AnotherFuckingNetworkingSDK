@@ -55,6 +55,8 @@ source and tests before relying on any example below.
   cookies, bodies, or sensitive URLs by default.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
   `NetworkTelemetryExporter`; keep exporters lightweight and vendor-neutral.
+- Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
+  sharing that never retains completed responses.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
@@ -101,6 +103,13 @@ closed on overflow. Do not add automatic reconnect or heartbeat behavior to
 the base connection; use `WebSocketReliabilityClient` when bounded retry and
 session restoration are explicitly desired. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
+
+### Request coalescing
+
+Wrap a response-capable client in `RequestCoalescingAPIClient` for duplicate
+concurrent reads. Make the key include request type, URL inputs, auth scope,
+and feature flags; return `nil` when an operation must always execute. This is
+single-flight only, not a response cache.
 
 ### Tests and release gates
 

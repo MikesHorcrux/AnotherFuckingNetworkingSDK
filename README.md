@@ -208,6 +208,26 @@ let imageData = try await client.send(
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
+## Request coalescing
+
+When several features ask for the same resource at once, wrap a response-capable
+client in `RequestCoalescingAPIClient` to share one in-flight operation:
+
+```swift
+let coalescingClient = RequestCoalescingAPIClient(client: client) { request in
+    guard let request = request as? GetUserRequest else { return nil }
+    return "user:\(request.userID)"
+}
+
+let user = try await coalescingClient.send(GetUserRequest(userID: 42))
+```
+
+The key provider must include the request type and every response-varying input,
+including auth scope, locale, and feature flags. Return `nil` to bypass sharing.
+This is single-flight only: completed responses are not retained, and cancelled
+waiters do not cancel work still needed by other callers. See
+[Request coalescing](docs/request-coalescing.md) for lifecycle details.
+
 ## Streaming HTTP responses
 
 Use `stream(_:)` when a response is large, long-lived, or naturally consumed
