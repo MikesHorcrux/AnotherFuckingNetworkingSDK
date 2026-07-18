@@ -204,6 +204,32 @@ let imageData = try await client.send(
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
+## Streaming HTTP responses
+
+Use `stream(_:)` when a response is large, long-lived, or naturally consumed
+incrementally. The method validates the HTTP status and completes any
+configured replay-safe retries before returning an `HTTPByteStream`; the body
+is never accumulated in memory by the SDK:
+
+```swift
+let stream = try await client.stream(DownloadAvatarRequest(userID: 42))
+print(stream.statusCode)
+
+var imageData = Data()
+for try await byte in stream {
+    imageData.append(byte)
+}
+```
+
+`HTTPByteStream` exposes response metadata before its first byte and is
+single-pass. Cancelling the consuming task cancels the underlying URL session
+task; call `stream.cancel()` when ownership needs to end explicitly. Once a
+successful stream has been returned, the SDK never retries a partially
+consumed response. SSE, NDJSON, and line-oriented framing can be built as
+small adapters over this byte sequence without changing the transport layer.
+Services that need this capability can depend on
+`any APIClientStreamingProtocol`.
+
 ## Request-specific status policies
 
 Requests accept HTTP `200...299` by default. Override `acceptedStatusCodes` when

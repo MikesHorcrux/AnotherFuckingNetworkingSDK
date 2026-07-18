@@ -20,6 +20,12 @@ public protocol APIClientResponseProtocol: APIClientProtocol {
     ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>>
 }
 
+/// A client capable of exposing successful HTTP response bodies as a
+/// single-pass byte stream.
+public protocol APIClientStreamingProtocol: Sendable {
+    func stream<R: HTTPRequest>(_ request: R) async throws -> HTTPByteStream
+}
+
 /// An API client that can upload memory or files and download directly to disk.
 public protocol APIClientTransferProtocol: APIClientResponseProtocol {
     func upload<R: Request>(
@@ -66,7 +72,7 @@ typealias RetryRandomProvider = @Sendable () -> Double
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol, Sendable {
+public final class APIClient: APIClientTransferProtocol, APIClientStreamingProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -263,6 +269,125 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     /// Sends a request and decodes its declared response type.
     public func send<R: Request>(_ request: R) async throws -> R.ReturnType {
         try await sendResponse(request).value
+    }
+
+    /// Opens a single-pass byte stream for an HTTP response.
+    ///
+    /// Status validation and retry decisions happen before the stream is
+    /// returned. Once a successful stream is returned, its bytes are exposed
+    /// exactly once and no retry can replay a partially consumed response.
+    /// Failed responses retain at most one mebibyte of body data in their
+    /// ``HTTPFailure`` value.
+    public func stream<R: HTTPRequest>(_ request: R) async throws -> HTTPByteStream {
+        guard let activityMonitor else {
+            return try await streamWithoutMonitoring(request, finish: nil)
+        }
+
+        let finish = activityMonitor.beginLease(.stream)
+        do {
+            return try await streamWithoutMonitoring(request, finish: finish)
+        } catch {
+            finish(
+                Task.isCancelled || error is CancellationError
+                    ? NetworkActivityOutcome.cancelled
+                    : NetworkActivityOutcome.failed
+            )
+            throw error
+        }
+    }
+
+    private func streamWithoutMonitoring<R: HTTPRequest>(
+        _ request: R,
+        finish: (@Sendable (NetworkActivityOutcome) -> Void)?
+    ) async throws -> HTTPByteStream {
+        try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
+        let retryPolicy = request.retryPolicy
+        let configuration = state.withCriticalRegion { $0 }
+        let urlRequest = try Self.makeURLRequest(
+            request,
+            configuration: configuration
+        )
+
+        var attempt = 1
+        while true {
+            try Task.checkCancellation()
+            logger?.log(request: urlRequest)
+
+            let bytes: URLSession.AsyncBytes
+            let response: URLResponse
+            do {
+                (bytes, response) = try await urlSession.bytes(for: urlRequest)
+            } catch {
+                let networkError = try Self.mappedTransportError(error)
+                try Task.checkCancellation()
+                let retryDelay: UInt64?
+                if case .transport(let urlError) = networkError {
+                    retryDelay = retryPolicy.retryDelayNanoseconds(
+                        afterAttempt: attempt,
+                        method: urlRequest.httpMethod ?? "",
+                        failure: .transport(urlError),
+                        now: retryNow(),
+                        randomUnitValue: retryRandom()
+                    )
+                } else {
+                    retryDelay = nil
+                }
+
+                guard let delay = retryDelay else {
+                    throw networkError
+                }
+                logger?.logRetry(
+                    nextAttempt: attempt + 1,
+                    delayNanoseconds: delay
+                )
+                try await waitBeforeRetry(delay)
+                attempt += 1
+                continue
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                bytes.task.cancel()
+                finish?(.failed)
+                throw NetworkError.invalidResponse
+            }
+
+            let metadata = HTTPResponseMetadata(httpResponse)
+            guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+                let failure = HTTPFailure(metadata: metadata)
+                let retryDelay = retryPolicy.retryDelayNanoseconds(
+                    afterAttempt: attempt,
+                    method: urlRequest.httpMethod ?? "",
+                    failure: .response(failure),
+                    now: retryNow(),
+                    randomUnitValue: retryRandom()
+                )
+
+                if let delay = retryDelay {
+                    bytes.task.cancel()
+                    logger?.logRetry(
+                        nextAttempt: attempt + 1,
+                        delayNanoseconds: delay
+                    )
+                    try await waitBeforeRetry(delay)
+                    attempt += 1
+                    continue
+                }
+
+                let errorData = await Self.readStreamErrorData(bytes)
+                bytes.task.cancel()
+                finish?(.failed)
+                throw NetworkError.requestFailed(
+                    HTTPFailure(metadata: metadata, data: errorData)
+                )
+            }
+
+            return HTTPByteStream(
+                bytes: bytes,
+                metadata: metadata,
+                finish: finish
+            )
+        }
     }
 
     /// Sends a request and returns its decoded value with HTTP metadata.
@@ -866,6 +991,28 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             return nil
         }
         return try? Data(contentsOf: url)
+    }
+
+    /// Avoids loading an unexpectedly large failed streaming response into
+    /// memory. The stream is cancelled by the caller after this method
+    /// returns, so this method intentionally stops as soon as the limit is
+    /// exceeded.
+    private static func readStreamErrorData(
+        _ bytes: URLSession.AsyncBytes
+    ) async -> Data? {
+        let maximumBytes = 1_048_576
+        var data = Data()
+        data.reserveCapacity(min(maximumBytes, 4_096))
+
+        do {
+            for try await byte in bytes {
+                guard data.count < maximumBytes else { return nil }
+                data.append(byte)
+            }
+            return data
+        } catch {
+            return data.isEmpty ? nil : data
+        }
     }
 
     private func discardDownloadedFile(at url: URL) async {
