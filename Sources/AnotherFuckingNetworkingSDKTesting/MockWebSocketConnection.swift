@@ -72,11 +72,11 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         receiveWaiter == nil ? 0 : 1
     }
 
-    private var incomingResults: [
+    private var incomingResults: FIFOQueue<
         Result<WebSocketMessage, any Error>
-    ]
-    private var sendResults: [Result<Void, any Error>] = []
-    private var pingResults: [Result<Void, any Error>] = []
+    >
+    private var sendResults = FIFOQueue<Result<Void, any Error>>()
+    private var pingResults = FIFOQueue<Result<Void, any Error>>()
     private var receiveWaiter: ReceiveWaiter?
     private var terminalError: (any Error)?
     private var nextSequenceID = 0
@@ -95,7 +95,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     ) {
         self.url = url
         self.negotiatedSubprotocol = negotiatedSubprotocol
-        incomingResults = incoming
+        incomingResults = FIFOQueue(incoming)
     }
 
     // MARK: Queue configuration
@@ -154,7 +154,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         record(.send(message))
         let result = sendResults.isEmpty
             ? Result<Void, any Error>.success(())
-            : sendResults.removeFirst()
+            : sendResults.popFirst()!
         _ = try resolveOperation(result)
     }
 
@@ -167,7 +167,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         record(.receive)
 
         if !incomingResults.isEmpty {
-            return try resolveOperation(incomingResults.removeFirst())
+            return try resolveOperation(incomingResults.popFirst()!)
         }
 
         let waiterID = UUID()
@@ -214,7 +214,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         record(.ping)
         let result = pingResults.isEmpty
             ? Result<Void, any Error>.success(())
-            : pingResults.removeFirst()
+            : pingResults.popFirst()!
         _ = try resolveOperation(result)
     }
 

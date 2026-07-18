@@ -161,23 +161,26 @@ public extension HTTPRequest {
     func customize(_ urlRequest: inout URLRequest) throws {}
 
     private static func isValidPercentEncodedPath(_ path: String) -> Bool {
-        let scalars = Array(path.unicodeScalars)
-        var index = 0
+        let scalars = path.unicodeScalars
+        var index = scalars.startIndex
 
-        while index < scalars.count {
+        while index != scalars.endIndex {
             let scalar = scalars[index]
             if scalar == "%" {
-                guard index + 2 < scalars.count,
-                      scalars[index + 1].isASCIIHexDigit,
-                      scalars[index + 2].isASCIIHexDigit else {
+                let first = scalars.index(after: index)
+                guard first != scalars.endIndex else { return false }
+                let second = scalars.index(after: first)
+                guard second != scalars.endIndex,
+                      scalars[first].isASCIIHexDigit,
+                      scalars[second].isASCIIHexDigit else {
                     return false
                 }
-                index += 3
+                index = scalars.index(after: second)
             } else {
                 guard CharacterSet.urlPathAllowed.contains(scalar) else {
                     return false
                 }
-                index += 1
+                index = scalars.index(after: index)
             }
         }
 

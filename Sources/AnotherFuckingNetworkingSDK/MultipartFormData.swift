@@ -70,10 +70,12 @@ public struct MultipartFormData: Sendable {
         }
 
         parts.append(Part(
-            data: Data(Self.normalizedLineEndings(value).utf8),
-            name: name,
-            filename: nil,
-            contentType: "text/plain; charset=utf-8"
+            data: Self.normalizedTextData(value),
+            header: Self.headerData(
+                name: name,
+                filename: nil,
+                contentType: "text/plain; charset=utf-8"
+            )
         ))
     }
 
@@ -94,9 +96,11 @@ public struct MultipartFormData: Sendable {
 
         parts.append(Part(
             data: data,
-            name: name,
-            filename: nil,
-            contentType: contentType
+            header: Self.headerData(
+                name: name,
+                filename: nil,
+                contentType: contentType
+            )
         ))
     }
 
@@ -119,9 +123,11 @@ public struct MultipartFormData: Sendable {
 
         parts.append(Part(
             data: data,
-            name: name,
-            filename: filename,
-            contentType: contentType
+            header: Self.headerData(
+                name: name,
+                filename: filename,
+                contentType: contentType
+            )
         ))
     }
 
@@ -141,30 +147,25 @@ public struct MultipartFormData: Sendable {
             throw MultipartEncodingError.boundaryCollision(partIndex: index)
         }
 
+        let delimiter = Data("--\(boundary)\r\n".utf8)
+        let closingDelimiter = Data("--\(boundary)--\r\n".utf8)
         var body = Data()
-        for part in parts {
-            body.appendUTF8("--\(boundary)\r\n")
-            body.appendUTF8(
-                "Content-Disposition: form-data; name=\""
-                    + Self.escapedQuotedValue(part.name)
-                    + "\""
-            )
-            if let filename = part.filename {
-                body.appendUTF8(
-                    "; filename=\""
-                        + Self.escapedQuotedValue(filename)
-                        + "\""
-                )
-            }
-            body.appendUTF8("\r\n")
-            if let contentType = part.contentType {
-                body.appendUTF8("Content-Type: \(contentType)\r\n")
-            }
-            body.appendUTF8("\r\n")
-            body.append(part.data)
-            body.appendUTF8("\r\n")
+        if let capacity = Self.encodedCapacity(
+            parts: parts,
+            delimiterByteCount: delimiter.count,
+            closingDelimiterByteCount: closingDelimiter.count
+        ) {
+            body.reserveCapacity(capacity)
         }
-        body.appendUTF8("--\(boundary)--\r\n")
+
+        for part in parts {
+            body.append(delimiter)
+            body.append(part.header)
+            body.append(part.data)
+            body.append(13)
+            body.append(10)
+        }
+        body.append(closingDelimiter)
         return body
     }
 
@@ -220,25 +221,86 @@ public struct MultipartFormData: Sendable {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    private static func normalizedLineEndings(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\n", with: "\r\n")
+    private static func headerData(
+        name: String,
+        filename: String?,
+        contentType: String?
+    ) -> Data {
+        var header = "Content-Disposition: form-data; name=\""
+            + escapedQuotedValue(name)
+            + "\""
+        if let filename {
+            header += "; filename=\"" + escapedQuotedValue(filename) + "\""
+        }
+        header += "\r\n"
+        if let contentType {
+            header += "Content-Type: \(contentType)\r\n"
+        }
+        header += "\r\n"
+        return Data(header.utf8)
+    }
+
+    private static func normalizedTextData(_ value: String) -> Data {
+        let bytes = value.utf8
+        var normalizedByteCount = 0
+        var previousWasCarriageReturn = false
+
+        for byte in bytes {
+            if byte == 10, previousWasCarriageReturn {
+                previousWasCarriageReturn = false
+                continue
+            }
+            normalizedByteCount += byte == 10 || byte == 13 ? 2 : 1
+            previousWasCarriageReturn = byte == 13
+        }
+
+        var data = Data()
+        data.reserveCapacity(normalizedByteCount)
+        previousWasCarriageReturn = false
+        for byte in bytes {
+            if byte == 10, previousWasCarriageReturn {
+                previousWasCarriageReturn = false
+                continue
+            }
+            if byte == 10 || byte == 13 {
+                data.append(13)
+                data.append(10)
+            } else {
+                data.append(byte)
+            }
+            previousWasCarriageReturn = byte == 13
+        }
+        return data
+    }
+
+    private static func encodedCapacity(
+        parts: [Part],
+        delimiterByteCount: Int,
+        closingDelimiterByteCount: Int
+    ) -> Int? {
+        var total = closingDelimiterByteCount
+        for part in parts {
+            guard Self.add(delimiterByteCount, to: &total),
+                  Self.add(part.header.count, to: &total),
+                  Self.add(part.data.count, to: &total),
+                  Self.add(2, to: &total) else {
+                return nil
+            }
+        }
+        return total
+    }
+
+    private static func add(_ value: Int, to total: inout Int) -> Bool {
+        let addition = total.addingReportingOverflow(value)
+        guard !addition.overflow else { return false }
+        total = addition.partialValue
+        return true
     }
 }
 
 private extension MultipartFormData {
     struct Part: Sendable {
         let data: Data
-        let name: String
-        let filename: String?
-        let contentType: String?
-    }
-}
-
-private extension Data {
-    mutating func appendUTF8(_ value: String) {
-        append(contentsOf: value.utf8)
+        let header: Data
     }
 }
