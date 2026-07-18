@@ -194,8 +194,16 @@ struct BackgroundTransferLifecycleTests {
         let coordinator = TransferJobCoordinator(store: store)
         let download = TransferJob(kind: .download, requestKey: "download")
         let upload = TransferJob(kind: .upload, requestKey: "upload")
+        let missing = TransferJob(kind: .download, requestKey: "missing")
+        let completed = TransferJob(
+            kind: .upload,
+            requestKey: "completed",
+            state: .succeeded
+        )
         try await coordinator.enqueue(download)
         try await coordinator.enqueue(upload)
+        try await coordinator.enqueue(missing)
+        try await coordinator.enqueue(completed)
         let lifecycle = BackgroundTransferLifecycleCoordinator(
             router: BackgroundTransferEventRouter(),
             coordinator: coordinator,
@@ -244,6 +252,7 @@ struct BackgroundTransferLifecycleTests {
         ])
         #expect(report.mismatchedTaskIdentifiers == [4])
         #expect(report.orphanedTaskIdentifiers == [5, 6])
+        #expect(report.jobsWithoutTasks == [missing.id])
     }
 
     @Test("Relaunch reconciliation keeps task-ID collision diagnostics")

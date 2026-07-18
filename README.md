@@ -576,6 +576,10 @@ for taskID in report.orphanedTaskIdentifiers {
 }
 ```
 
+`report.jobsWithoutTasks` is the complementary recovery signal: it lists
+non-terminal durable jobs that have no valid live Foundation task and may need
+to be re-enqueued by the application.
+
 For a single durable callback path, compose the router and coordinator with
 `BackgroundTransferLifecycleCoordinator`. It starts restored jobs when the
 first delegate callback arrives, persists monotonic progress, and refuses to

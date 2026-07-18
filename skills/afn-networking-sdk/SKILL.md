@@ -54,7 +54,8 @@ source and tests before relying on any example below.
   failures. Completion callbacks carrying bounded resume data become paused
   jobs; non-resumable callbacks become failures. Use
   `reconcile(adapter:)` after relaunch to validate identity/direction and
-  inspect orphaned or mismatched task IDs before handling events. The
+  inspect orphaned or mismatched task IDs, then re-enqueue
+  `jobsWithoutTasks` before handling events. The
   Foundation background adapter is iOS/macOS-only; pair the durable
   coordinator with platform-owned transports on tvOS, watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks

@@ -9,11 +9,14 @@ public struct BackgroundTransferRelaunchReport: Equatable, Sendable {
     public let orphanedTaskIdentifiers: [Int]
     /// Task identifiers whose Foundation direction disagrees with the job.
     public let mismatchedTaskIdentifiers: [Int]
+    /// Non-terminal durable jobs that have no valid Foundation task route.
+    public let jobsWithoutTasks: [UUID]
 
     public init(
         routes: [BackgroundTransferRoute] = [],
         orphanedTaskIdentifiers: [Int] = [],
-        mismatchedTaskIdentifiers: [Int] = []
+        mismatchedTaskIdentifiers: [Int] = [],
+        jobsWithoutTasks: [UUID] = []
     ) {
         self.routes = routes.sorted { $0.taskIdentifier < $1.taskIdentifier }
         self.orphanedTaskIdentifiers = Array(
@@ -22,6 +25,9 @@ public struct BackgroundTransferRelaunchReport: Equatable, Sendable {
         self.mismatchedTaskIdentifiers = Array(
             Set(mismatchedTaskIdentifiers)
         ).sorted()
+        self.jobsWithoutTasks = Array(Set(jobsWithoutTasks)).sorted {
+            $0.uuidString < $1.uuidString
+        }
     }
 }
 
