@@ -81,6 +81,126 @@ struct MockAPIClientTests {
         }
     }
 
+    @Test("Successful request and page stubs enforce status policies")
+    func successfulStubStatusPolicies() async throws {
+        let mock = MockAPIClient()
+        let value = TestUser(id: 9, displayName: "Conflict")
+        let body = Data(#"{"id":9}"#.utf8)
+        let metadata = HTTPResponseMetadata(
+            statusCode: 409,
+            url: URL(string: "https://api.example.com/conflict"),
+            headers: ["X-Request-ID": "mock-status"]
+        )
+        await mock.stubResponse(
+            MockStatusRequest.self,
+            with: HTTPResponse(value: value, data: body, metadata: metadata)
+        )
+        await mock.stubPageResponse(
+            MockStatusPageRequest.self,
+            with: HTTPResponse(
+                value: PaginatedResponse(
+                    items: [value],
+                    currentPage: 1,
+                    totalPages: 1
+                ),
+                data: body,
+                metadata: metadata
+            )
+        )
+
+        let requestResponse = try await mock.sendResponse(
+            MockStatusRequest(acceptedStatusCodes: .codes([409]))
+        )
+        let pageResponse = try await mock.sendPageResponse(
+            MockStatusPageRequest(acceptedStatusCodes: .codes([409]))
+        )
+
+        #expect(requestResponse.metadata == metadata)
+        #expect(pageResponse.metadata == metadata)
+
+        do {
+            _ = try await mock.send(
+                MockStatusRequest(acceptedStatusCodes: .successful)
+            )
+            Issue.record("Expected the mock request status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure == HTTPFailure(metadata: metadata, data: body))
+        }
+
+        do {
+            _ = try await mock.sendPage(
+                MockStatusPageRequest(acceptedStatusCodes: .successful)
+            )
+            Issue.record("Expected the mock page status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure == HTTPFailure(metadata: metadata, data: body))
+        }
+    }
+
+    @Test("Synthesized mock status 200 is validated at invocation time")
+    func synthesizedStatusPolicy() async throws {
+        let mock = MockAPIClient()
+        await mock.stub(
+            MockStatusRequest.self,
+            with: TestUser(id: 1, displayName: "Default")
+        )
+
+        do {
+            _ = try await mock.send(
+                MockStatusRequest(acceptedStatusCodes: .codes([201]))
+            )
+            Issue.record("Expected synthesized HTTP 200 to be rejected")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 200)
+            #expect(failure.data == Data())
+            #expect(failure.url == URL(string: "https://mock.invalid/status-policy"))
+        }
+
+        await mock.stubError(
+            MockStatusRequest.self,
+            error: MockFixtureError.exact
+        )
+        do {
+            _ = try await mock.send(
+                MockStatusRequest(acceptedStatusCodes: .none)
+            )
+            Issue.record("Expected the explicit failure stub")
+        } catch let error as MockFixtureError {
+            #expect(error == .exact)
+        }
+    }
+
+    @Test("Status policies do not alter exact mock wire identity")
+    func statusPolicyIsNotExactIdentity() async throws {
+        let mock = MockAPIClient()
+        let expected = HTTPResponse(
+            value: TestUser(id: 1, displayName: "Exact"),
+            metadata: HTTPResponseMetadata(statusCode: 201)
+        )
+        try await mock.stubResponse(
+            MockStatusRequest(acceptedStatusCodes: .none),
+            with: expected
+        )
+
+        let response = try await mock.sendResponse(
+            MockStatusRequest(acceptedStatusCodes: .codes([201]))
+        )
+
+        #expect(response == expected)
+    }
+
     @Test("Exact success overrides a type-wide error")
     func exactSuccessPrecedence() async throws {
         let mock = MockAPIClient()
@@ -600,6 +720,22 @@ private struct MockPageRequest: PaginatedRequest {
     var queryItems: [URLQueryItem]? {
         [URLQueryItem(name: "filter", value: filter)]
     }
+}
+
+private struct MockStatusRequest: Request {
+    typealias ReturnType = TestUser
+
+    let acceptedStatusCodes: HTTPStatusPolicy
+    let path = "status-policy"
+}
+
+private struct MockStatusPageRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    let acceptedStatusCodes: HTTPStatusPolicy
+    let page = 1
+    let pageSize = 20
+    let path = "status-policy-page"
 }
 
 private struct RecordingRequest: Request {

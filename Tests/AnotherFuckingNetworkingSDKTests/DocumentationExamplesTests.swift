@@ -149,6 +149,30 @@ struct DocumentationExamplesTests {
         ).statusCode == 200)
     }
 
+    @Test("Request-specific status policy examples compile")
+    func statusPolicies() async throws {
+        let body = Data(#"{"id":42,"displayName":"Existing"}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: body
+            ))
+        }
+        let client: any APIClientResponseProtocol = stub.client()
+
+        let response = try await client.sendResponse(
+            DocumentationCreateOrReturnUserRequest()
+        )
+
+        #expect(response.statusCode == 409)
+        #expect(response.value == DocumentationUser(
+            id: 42,
+            displayName: "Existing"
+        ))
+        #expect(HTTPStatusPolicy(200...299, 304...304).accepts(304))
+    }
+
     @Test("Upload and download examples compile through the transfer protocol")
     func fileTransfers() async throws {
         let stub = StubSession { request in
@@ -402,6 +426,14 @@ private struct DocumentationCreateUserRequest: Request {
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         try encoder.encode(payload)
     }
+}
+
+private struct DocumentationCreateOrReturnUserRequest: Request {
+    typealias ReturnType = DocumentationUser
+
+    let path = "users"
+    let method = HTTPMethod.post
+    let acceptedStatusCodes = HTTPStatusPolicy(200...299, 409...409)
 }
 
 private struct DocumentationListUsersRequest: PaginatedRequest {

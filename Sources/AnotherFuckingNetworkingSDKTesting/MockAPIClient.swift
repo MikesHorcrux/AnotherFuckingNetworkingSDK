@@ -541,6 +541,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         _ request: R
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let context = try makeContext(for: request, operation: .request)
         let invocation = record(request, operation: .request, context: context)
         let resolvedStub = resolve(
@@ -561,13 +562,19 @@ public actor MockAPIClient: APIClientTransferProtocol {
             guard let response = value as? R.ReturnType else {
                 throw MockAPIClientError.responseTypeMismatch(invocation)
             }
+            let responseMetadata = metadata ?? HTTPResponseMetadata(
+                statusCode: 200,
+                url: context.url
+            )
+            try Self.validateStatus(
+                responseMetadata,
+                data: data,
+                acceptedStatusCodes: acceptedStatusCodes
+            )
             return HTTPResponse(
                 value: response,
                 data: data,
-                metadata: metadata ?? HTTPResponseMetadata(
-                    statusCode: 200,
-                    url: context.url
-                )
+                metadata: responseMetadata
             )
         case .failure(let error):
             throw error
@@ -584,6 +591,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         _ request: R
     ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>> {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let context = try makeContext(for: request, operation: .page)
         let invocation = record(request, operation: .page, context: context)
         let resolvedStub = resolve(
@@ -604,13 +612,19 @@ public actor MockAPIClient: APIClientTransferProtocol {
             guard let response = value as? PaginatedResponse<R.ReturnType> else {
                 throw MockAPIClientError.responseTypeMismatch(invocation)
             }
+            let responseMetadata = metadata ?? HTTPResponseMetadata(
+                statusCode: 200,
+                url: context.url
+            )
+            try Self.validateStatus(
+                responseMetadata,
+                data: data,
+                acceptedStatusCodes: acceptedStatusCodes
+            )
             return HTTPResponse(
                 value: response,
                 data: data,
-                metadata: metadata ?? HTTPResponseMetadata(
-                    statusCode: 200,
-                    url: context.url
-                )
+                metadata: responseMetadata
             )
         case .failure(let error):
             throw error
@@ -624,6 +638,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         from body: UploadBody
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let operation = MockTransferOperation.upload(body)
         let context = try makeTransferContext(for: request, operation: operation)
         let invocation = recordTransfer(
@@ -649,6 +664,11 @@ public actor MockAPIClient: APIClientTransferProtocol {
             guard let response = value as? HTTPResponse<R.ReturnType> else {
                 throw MockTransferError.responseTypeMismatch(invocation)
             }
+            try Self.validateStatus(
+                response.metadata,
+                data: response.data,
+                acceptedStatusCodes: acceptedStatusCodes
+            )
             return response
         case .failure(let error):
             if Task.isCancelled || error is CancellationError {
@@ -665,6 +685,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
+        let acceptedStatusCodes = request.acceptedStatusCodes
         let operation = MockTransferOperation.download(destination)
         let context = try makeTransferContext(for: request, operation: operation)
         let invocation = recordTransfer(
@@ -688,11 +709,21 @@ public actor MockAPIClient: APIClientTransferProtocol {
         switch resolvedStub {
         case .downloadResponse(let response):
             try Task.checkCancellation()
+            try Self.validateStatus(
+                response.metadata,
+                data: nil,
+                acceptedStatusCodes: acceptedStatusCodes
+            )
             return response
         case .downloadFactory(let factory):
             do {
                 let response = try await factory(invocation)
                 try Task.checkCancellation()
+                try Self.validateStatus(
+                    response.metadata,
+                    data: nil,
+                    acceptedStatusCodes: acceptedStatusCodes
+                )
                 return response
             } catch {
                 if Task.isCancelled || error is CancellationError {
@@ -990,6 +1021,19 @@ public actor MockAPIClient: APIClientTransferProtocol {
             result[name] = value
         }
         return result
+    }
+
+    private static func validateStatus(
+        _ metadata: HTTPResponseMetadata,
+        data: Data?,
+        acceptedStatusCodes: HTTPStatusPolicy
+    ) throws {
+        guard acceptedStatusCodes.accepts(metadata.statusCode) else {
+            throw NetworkError.requestFailed(HTTPFailure(
+                metadata: metadata,
+                data: data
+            ))
+        }
     }
 
     private static func nanoseconds(for delay: TimeInterval) -> UInt64 {

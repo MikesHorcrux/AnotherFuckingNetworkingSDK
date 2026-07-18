@@ -93,7 +93,10 @@ struct MockTransferTests {
 
         do {
             _ = try await mock.upload(
-                MockTransferUploadRequest(id: 1),
+                MockTransferUploadRequest(
+                    id: 1,
+                    acceptedStatusCodes: .none
+                ),
                 from: .data(Data("upload".utf8))
             )
             Issue.record("Expected the upload HTTP failure")
@@ -106,7 +109,10 @@ struct MockTransferTests {
         }
 
         do {
-            _ = try await mock.download(MockTransferDownloadRequest(id: 1))
+            _ = try await mock.download(MockTransferDownloadRequest(
+                id: 1,
+                acceptedStatusCodes: .none
+            ))
             Issue.record("Expected the download HTTP failure")
         } catch let networkError as NetworkError {
             guard case .requestFailed(let failure) = networkError else {
@@ -114,6 +120,85 @@ struct MockTransferTests {
                 return
             }
             #expect(failure == expected)
+        }
+    }
+
+    @Test("Successful transfer stubs enforce request status policies")
+    func successfulTransferStatusPolicies() async throws {
+        let mock = MockAPIClient()
+        let uploadMetadata = HTTPResponseMetadata(
+            statusCode: 409,
+            url: URL(string: "https://api.example.com/uploads/conflict"),
+            headers: ["X-Request-ID": "mock-upload"]
+        )
+        let uploadBody = Data("upload-conflict".utf8)
+        await mock.stubUpload(
+            MockTransferUploadRequest.self,
+            with: HTTPResponse(
+                value: MockTransferValue(id: 9),
+                data: uploadBody,
+                metadata: uploadMetadata
+            )
+        )
+        let downloadMetadata = HTTPResponseMetadata(
+            statusCode: 304,
+            url: URL(string: "https://api.example.com/downloads/not-modified"),
+            headers: ["ETag": "fixture"]
+        )
+        await mock.stubDownload(
+            MockTransferDownloadRequest.self,
+            with: DownloadResponse(
+                fileURL: mockFileURL("not-modified"),
+                metadata: downloadMetadata
+            )
+        )
+
+        let upload = try await mock.upload(
+            MockTransferUploadRequest(
+                id: 1,
+                acceptedStatusCodes: .codes([409])
+            ),
+            from: .data(Data("payload".utf8))
+        )
+        let download = try await mock.download(
+            MockTransferDownloadRequest(
+                id: 1,
+                acceptedStatusCodes: .codes([304])
+            )
+        )
+
+        #expect(upload.metadata == uploadMetadata)
+        #expect(download.metadata == downloadMetadata)
+
+        do {
+            _ = try await mock.upload(
+                MockTransferUploadRequest(id: 2),
+                from: .data(Data("payload".utf8))
+            )
+            Issue.record("Expected the mock upload status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure == HTTPFailure(
+                metadata: uploadMetadata,
+                data: uploadBody
+            ))
+        }
+
+        do {
+            _ = try await mock.download(MockTransferDownloadRequest(id: 2))
+            Issue.record("Expected the mock download status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure == HTTPFailure(
+                metadata: downloadMetadata,
+                data: nil
+            ))
         }
     }
 
@@ -168,7 +253,10 @@ struct MockTransferTests {
         )
 
         #expect(try await mock.upload(
-            uploadRequest,
+            MockTransferUploadRequest(
+                id: uploadRequest.id,
+                acceptedStatusCodes: .codes([201])
+            ),
             from: .file(firstFile)
         ).value.id == 1)
         #expect(try await mock.upload(
@@ -195,7 +283,10 @@ struct MockTransferTests {
         )
 
         #expect(try await mock.download(
-            downloadRequest,
+            MockTransferDownloadRequest(
+                id: downloadRequest.id,
+                acceptedStatusCodes: .codes([200])
+            ),
             to: .temporary
         ).fileURL == mockFileURL("temporary"))
         #expect(try await mock.download(
@@ -240,22 +331,41 @@ struct MockTransferTests {
         }
 
         let first = try await mock.download(MockTransferDownloadRequest(id: 1))
-        let second = try await mock.download(MockTransferDownloadRequest(id: 2))
+        let second = try await mock.download(MockTransferDownloadRequest(
+            id: 2,
+            acceptedStatusCodes: .codes([202])
+        ))
+
+        do {
+            _ = try await mock.download(MockTransferDownloadRequest(
+                id: 3,
+                acceptedStatusCodes: .codes([204])
+            ))
+            Issue.record("Expected the factory response status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 203)
+            #expect(failure.data == nil)
+        }
 
         #expect(first.fileURL == mockFileURL("factory-1"))
         #expect(second.fileURL == mockFileURL("factory-2"))
         #expect(first.statusCode == 201)
         #expect(second.statusCode == 202)
-        #expect(factoryRecords.withLock { $0.map(\.sequenceID) } == [0, 1])
+        #expect(factoryRecords.withLock { $0.map(\.sequenceID) } == [0, 1, 2])
         let records = await mock.recordedTransfers
         #expect(records.map(\.requestBody) == [
             Data("request-1".utf8),
-            Data("request-2".utf8)
+            Data("request-2".utf8),
+            Data("request-3".utf8)
         ])
         #expect(records.map { $0.headers["x-transfer"] } == [
-            "download", "download"
+            "download", "download", "download"
         ])
-        #expect(records.map { $0.queryItems.first?.value } == ["1", "2"])
+        #expect(records.map { $0.queryItems.first?.value } == ["1", "2", "3"])
     }
 
     @Test("Missing stubs include records and reset clears transfer state")
@@ -493,6 +603,7 @@ private struct MockTransferUploadRequest: Request {
     typealias ReturnType = MockTransferValue
 
     let id: Int
+    let acceptedStatusCodes: HTTPStatusPolicy
     var path: String { "uploads/\(id)" }
     let method = HTTPMethod.post
     var queryItems: [URLQueryItem]? {
@@ -500,6 +611,14 @@ private struct MockTransferUploadRequest: Request {
     }
     var headers: [String: String]? {
         ["X-Request": String(id)]
+    }
+
+    init(
+        id: Int,
+        acceptedStatusCodes: HTTPStatusPolicy = .successful
+    ) {
+        self.id = id
+        self.acceptedStatusCodes = acceptedStatusCodes
     }
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
@@ -515,12 +634,21 @@ private struct MockTransferUploadRequest: Request {
 
 private struct MockTransferDownloadRequest: DownloadRequest {
     let id: Int
+    let acceptedStatusCodes: HTTPStatusPolicy
     var path: String { "downloads/\(id)" }
     let method = HTTPMethod.post
     var queryItems: [URLQueryItem]? {
         [URLQueryItem(name: "id", value: String(id))]
     }
     var body: Data? { Data("request-\(id)".utf8) }
+
+    init(
+        id: Int,
+        acceptedStatusCodes: HTTPStatusPolicy = .successful
+    ) {
+        self.id = id
+        self.acceptedStatusCodes = acceptedStatusCodes
+    }
 
     func customize(_ request: inout URLRequest) throws {
         request.setValue("download", forHTTPHeaderField: "X-Transfer")

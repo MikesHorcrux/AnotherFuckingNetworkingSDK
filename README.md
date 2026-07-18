@@ -204,6 +204,36 @@ let imageData = try await client.send(
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
+## Request-specific status policies
+
+Requests accept HTTP `200...299` by default. Override `acceptedStatusCodes` when
+an endpoint deliberately uses another status, or when it needs a narrower
+definition of success:
+
+```swift
+struct CreateOrReturnUserRequest: Request {
+    typealias ReturnType = User
+
+    let path = "users"
+    let method = HTTPMethod.post
+    let acceptedStatusCodes = HTTPStatusPolicy(
+        200...299,
+        409...409
+    )
+}
+```
+
+`HTTPStatusPolicy.successful`, `.all`, and `.none` cover common cases. Use
+`HTTPStatusPolicy.codes([201, 204, 304])` for exact codes, or pass one or more
+inclusive ranges. Policies are immutable `Sendable` values, normalized once,
+and captured once before transport suspension. They apply consistently to
+ordinary requests, pagination, uploads, and downloads.
+
+Accepting a status does not relax response-body decoding. A bodyless accepted
+status still requires `EmptyResponse`, `RawDataRequest`, or an explicit
+`allowsEmptyResponseBody` implementation. Rejected statuses retain their
+metadata and body through `NetworkError.requestFailed(HTTPFailure)`.
+
 ## Uploads and downloads
 
 `APIClient` uses URLSession upload tasks for both in-memory data and files. The upload response is decoded like an ordinary request and includes HTTP metadata:
@@ -661,7 +691,7 @@ await mock.stubResponse(
 )
 ```
 
-Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
+Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Successful stubs are checked against the invoking request's status policy; use metadata-aware stubs when a request excludes `200`. A status policy controls response interpretation, so it is intentionally excluded from exact-stub wire identity and recordings. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
@@ -703,7 +733,21 @@ let secondDownload = try await transferClient.download(
 let transfers = await transferMock.recordedTransfers
 ```
 
-Mock transfers perform no filesystem I/O. A file upload source does not need to exist, download destinations are matched and recorded without being created or replaced, and a `DownloadResponse` returns exactly the URL supplied by its stub. Consequently, the mock does not reproduce production failures for missing or unreadable sources and existing destinations; cover those policies with `APIClient` transfer tests. Use a download factory, as above, when repeated temporary downloads need distinct URLs. `recordedTransfers` preserves invocation order and includes the final URL, headers, request body, upload source, or download destination. Transfer sequence IDs remain monotonic for the mock's lifetime, including across `clearRecordedTransfers()` and `reset()`, so in-flight factories cannot reuse an identifier. Clearing records leaves stubs intact; `reset()` clears all stubs and recordings.
+Mock transfers perform no filesystem I/O. Upload and download success stubs still
+enforce the invoking request's status policy; a rejected mock download carries
+`failure.data == nil` because the mock never reads its file URL. A file upload
+source does not need to exist, download destinations are matched and recorded
+without being created or replaced, and a `DownloadResponse` returns exactly the
+URL supplied by its stub. Consequently, the mock does not reproduce production
+failures for missing or unreadable sources and existing destinations; cover
+those policies with `APIClient` transfer tests. Use a download factory, as
+above, when repeated temporary downloads need distinct URLs.
+`recordedTransfers` preserves invocation order and includes the final URL,
+headers, request body, upload source, or download destination. Transfer sequence
+IDs remain monotonic for the mock's lifetime, including across
+`clearRecordedTransfers()` and `reset()`, so in-flight factories cannot reuse an
+identifier. Clearing records leaves stubs intact; `reset()` clears all stubs and
+recordings.
 
 WebSocket services can use the same protocol-based pattern with
 `MockWebSocketClient` and `MockWebSocketConnection`:
@@ -768,6 +812,9 @@ Version 2 is a deliberate major-version modernization:
   `.requestFailed(let failure)`, then read `failure.statusCode`, `failure.data`,
   `failure.url`, or `failure.headers`. Construct explicit failures with
   `.requestFailed(HTTPFailure(metadata:data:))`.
+- Add `acceptedStatusCodes` to requests that intentionally accept non-2xx
+  responses or reject part of the default `200...299` range. Existing request
+  conformers inherit `.successful`; successful mock stubs now enforce it.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.
