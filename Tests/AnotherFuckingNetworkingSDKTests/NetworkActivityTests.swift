@@ -50,15 +50,24 @@ struct NetworkActivityTests {
         let monitor = NetworkActivityMonitor()
         let operationCount = 500
         let stream = monitor.snapshots()
+        let subscriberReady = AsyncSignal()
         let revisions = Task { () -> [UInt64] in
             var observed: [UInt64] = []
             for await snapshot in stream {
                 observed.append(snapshot.revision)
+                if observed.count == 1 {
+                    await subscriberReady.signal()
+                }
                 if snapshot.succeededCount == UInt64(operationCount) {
                     return observed
                 }
             }
             return observed
+        }
+        guard await subscriberReady.wait() else {
+            revisions.cancel()
+            _ = await revisions.value
+            return
         }
 
         await withTaskGroup(of: Void.self) { group in
