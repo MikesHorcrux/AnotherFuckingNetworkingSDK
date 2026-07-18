@@ -41,8 +41,8 @@ public actor RequestConcurrencyLimiter: Sendable {
     public func withPermit<Value: Sendable>(
         operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
-        let permitID = try await acquire()
-        defer { release(permitID) }
+        try await acquire()
+        defer { release() }
         return try await operation()
     }
 
@@ -56,10 +56,10 @@ public actor RequestConcurrencyLimiter: Sendable {
         waiters.count
     }
 
-    private func acquire() async throws -> UUID {
+    private func acquire() async throws {
         if activeRequests < maximumConcurrentRequests {
             activeRequests += 1
-            return UUID()
+            return
         }
 
         let waiterID = UUID()
@@ -75,14 +75,12 @@ public actor RequestConcurrencyLimiter: Sendable {
                     ))
                 }
             }
-            return waiterID
         } onCancel: {
             Task { await self.cancelWaiter(waiterID) }
         }
     }
 
-    private func release(_ permitID: UUID) {
-        _ = permitID
+    private func release() {
         guard activeRequests > 0 else { return }
         activeRequests -= 1
         grantNextWaiterIfAvailable()
