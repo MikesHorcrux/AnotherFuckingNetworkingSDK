@@ -300,6 +300,59 @@ extension AuthenticatedHTTPRequest: Request where Base: Request {
 
 extension AuthenticatedHTTPRequest: DownloadRequest where Base: DownloadRequest {}
 
+extension AuthenticatedAPIClient: APIClientTransferProgressProtocol
+where BaseClient: APIClientTransferProgressProtocol {
+    public func upload<R: Request>(
+        _ request: R,
+        from body: UploadBody,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> HTTPResponse<R.ReturnType> {
+        var token = try await authenticator.accessToken()
+        do {
+            return try await baseClient.upload(
+                AuthenticatedHTTPRequest(request: request, token: token),
+                from: body,
+                progress: progress
+            )
+        } catch {
+            guard Self.shouldRefresh(after: error), Self.canReplay(request) else {
+                throw error
+            }
+            token = try await authenticator.refreshToken()
+            return try await baseClient.upload(
+                AuthenticatedHTTPRequest(request: request, token: token),
+                from: body,
+                progress: progress
+            )
+        }
+    }
+
+    public func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> DownloadResponse {
+        var token = try await authenticator.accessToken()
+        do {
+            return try await baseClient.download(
+                AuthenticatedHTTPRequest(request: request, token: token),
+                to: destination,
+                progress: progress
+            )
+        } catch {
+            guard Self.shouldRefresh(after: error), Self.canReplay(request) else {
+                throw error
+            }
+            token = try await authenticator.refreshToken()
+            return try await baseClient.download(
+                AuthenticatedHTTPRequest(request: request, token: token),
+                to: destination,
+                progress: progress
+            )
+        }
+    }
+}
+
 private struct AuthenticatedPaginatedRequest<Base: PaginatedRequest>: PaginatedRequest {
     typealias ReturnType = Base.ReturnType
 

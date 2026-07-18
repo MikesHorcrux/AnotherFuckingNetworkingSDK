@@ -457,7 +457,26 @@ errors trigger a best-effort discard of Foundation's owned temporary file
 without replacing the primary operation error. After a successful return,
 destination ownership and cleanup belong to the caller.
 
-These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
+Opt into byte and lifecycle progress through `APIClientTransferProgressProtocol`:
+
+```swift
+let response = try await client.upload(
+    UploadRequest(),
+    from: .file(fileURL),
+    progress: { event in
+        print(event.phase, event.bytesCompleted, event.fractionCompleted as Any)
+    }
+)
+```
+
+Progress events are `Sendable`, bounded, and include the operation, phase,
+attempt number, completed bytes, and an optional known total. The callback must
+remain lightweight because URLSession invokes it on its delegate context. The
+default transfer APIs do no progress work.
+
+These APIs model foreground async transfers. Resumable downloads and
+relaunch-safe background sessions require application lifecycle policy and are
+intentionally separate concerns.
 
 ## WebSockets
 

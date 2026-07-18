@@ -43,6 +43,8 @@ source and tests before relying on any example below.
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
   `DownloadDestination`, durable file ownership.
+- Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
+  are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
   buffering, lifecycle state, and Observation adapters.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,

@@ -12,24 +12,23 @@ roadmap item is not a shipped feature.
 - Single-pass HTTP byte streams with bounded failures and lifecycle activity.
 - Authenticated wrapper with single-flight token loading and safe 401 replay.
 - Memory/file uploads, durable foreground downloads, multipart validation.
+- Opt-in upload/download progress events with bounded byte counts and phases.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 
 ## Next production modules
 
-1. **Transfer progress events** — byte counts and expected lengths for uploads,
-   downloads, and streams without adding work to clients that do not opt in.
-2. **Background/resumable transfers** — separate product with persistent
+1. **Background/resumable transfers** — separate product with persistent
    identity, delegate rebinding, resume data, and relaunch completion handling.
-3. **Telemetry** — operation/attempt IDs, duration, bytes, task metrics, and an
+2. **Telemetry** — operation/attempt IDs, duration, bytes, task metrics, and an
    optional OpenTelemetry bridge.
-4. **Streaming multipart** — file-backed parts and bounded encoding.
-5. **WebSocket reliability policies** — reconnect, heartbeat, backoff, and
+3. **Streaming multipart** — file-backed parts and bounded encoding.
+4. **WebSocket reliability policies** — reconnect, heartbeat, backoff, and
    session restoration as opt-in wrappers.
-6. **Caching and request coalescing** — conditional requests and explicit cache
+5. **Caching and request coalescing** — conditional requests and explicit cache
    policy, without imposing application-wide cache semantics.
-7. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
+6. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
    Catalyst evaluation.
 
 ## Deliberate non-goals
