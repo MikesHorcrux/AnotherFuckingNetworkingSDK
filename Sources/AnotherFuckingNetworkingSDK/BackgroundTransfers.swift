@@ -1,6 +1,8 @@
 import Foundation
 
 let transferResumeDataLimitBytes = 8 * 1_024 * 1_024
+private let transferResumeDataEncodedLimitBytes =
+    ((transferResumeDataLimitBytes + 2) / 3) * 4
 
 private func boundedTransferResumeData(_ data: Data?) -> Data? {
     guard let data, data.count <= transferResumeDataLimitBytes else {
@@ -84,6 +86,17 @@ public struct TransferJob: Codable, Equatable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let encodedResumeData = try container.decodeIfPresent(
+            String.self,
+            forKey: .resumeData
+        )
+        let decodedResumeData: Data?
+        if let encodedResumeData,
+           encodedResumeData.utf8.count <= transferResumeDataEncodedLimitBytes {
+            decodedResumeData = Data(base64Encoded: encodedResumeData)
+        } else {
+            decodedResumeData = nil
+        }
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             kind: try container.decode(TransferJobKind.self, forKey: .kind),
@@ -93,7 +106,7 @@ public struct TransferJob: Codable, Equatable, Sendable {
             bytesCompleted: try container.decode(Int64.self, forKey: .bytesCompleted),
             totalBytes: try container.decodeIfPresent(Int64.self, forKey: .totalBytes),
             attempt: try container.decode(Int.self, forKey: .attempt),
-            resumeData: try container.decodeIfPresent(Data.self, forKey: .resumeData),
+            resumeData: decodedResumeData,
             destinationURL: try container.decodeIfPresent(URL.self, forKey: .destinationURL),
             lastError: try container.decodeIfPresent(String.self, forKey: .lastError)
         )
