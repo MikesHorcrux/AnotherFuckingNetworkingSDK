@@ -352,6 +352,15 @@ rejected payload. `maximumMessageSize` remains Foundation's per-message limit;
 the buffering policy is an aggregate retained-payload limit. Because one
 Foundation message may be in flight, it is not a strict peak-memory ceiling.
 
+The `AnotherFuckingNetworkingSDKTesting` product mirrors those semantics.
+`MockWebSocketClient` includes the policy in exact-stub matching and structured
+request records. `MockWebSocketConnection` accepts a validating custom-policy
+initializer, exposes buffered message and payload-byte counts, delivers
+directly to a waiting receiver without retaining the payload, and preserves an
+accepted prefix across normal closure, injected failure, or typed overflow.
+`reset()` clears that buffered and terminal state while retaining the mock's
+immutable policy.
+
 `states` emits an immediate lifecycle snapshot, pushes later `.open`,
 `.closing`, and `.closed` transitions, and finishes after closure. Each
 subscriber has a newest-only buffer, so an idle or slow observer cannot grow

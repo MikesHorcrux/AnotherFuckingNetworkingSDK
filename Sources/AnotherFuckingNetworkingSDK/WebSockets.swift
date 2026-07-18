@@ -391,9 +391,10 @@ public struct WebSocketMessages: AsyncSequence, Sendable {
 // MARK: - Request construction
 
 package enum WebSocketRequestBuilder {
-    struct PreparedRequest {
-        let urlRequest: URLRequest
-        let transportConfiguration: WebSocketTransportConfiguration
+    package struct PreparedRequest {
+        package let urlRequest: URLRequest
+        package let subprotocols: [String]
+        package let transportConfiguration: WebSocketTransportConfiguration
     }
 
     private struct RequestOptions {
@@ -428,7 +429,7 @@ package enum WebSocketRequestBuilder {
     /// Snapshots transport-affecting request options once so validation and
     /// transport construction cannot observe different values from a
     /// synchronized mutable request conformer.
-    static func prepare<R: WebSocketRequest>(
+    package static func prepare<R: WebSocketRequest>(
         _ request: R,
         baseURL: URL?,
         globalHeaders: [String: String]
@@ -494,6 +495,7 @@ package enum WebSocketRequestBuilder {
         )
         return PreparedRequest(
             urlRequest: urlRequest,
+            subprotocols: options.subprotocols,
             transportConfiguration: WebSocketTransportConfiguration(
                 maximumMessageSize: options.maximumMessageSize,
                 inboundBufferingPolicy: bufferingPolicy

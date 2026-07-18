@@ -279,9 +279,14 @@ struct DocumentationExamplesTests {
 
     @Test("WebSocket examples compile and run through protocol existentials")
     func webSockets() async throws {
-        let mockConnection = MockWebSocketConnection(
+        let bufferingPolicy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 64,
+            maximumBytes: 8 * 1_024 * 1_024
+        )
+        let mockConnection = try MockWebSocketConnection(
             url: URL(string: "wss://example.com/rooms/lobby/socket")!,
             negotiatedSubprotocol: "chat.v1",
+            inboundBufferingPolicy: bufferingPolicy,
             incoming: [
                 .success(.text("welcome")),
                 .success(.binary(Data([0x01, 0x02])))
@@ -331,6 +336,12 @@ struct DocumentationExamplesTests {
             code: .normalClosure,
             reason: Data("Done".utf8)
         ))
+        #expect(mockConnection.inboundBufferingPolicy == bufferingPolicy)
+        #expect(await mockConnection.bufferedMessageCount == 0)
+        #expect(await mockConnection.bufferedByteCount == 0)
+        #expect(await mockClient.recordedRequests.map(
+            \.inboundBufferingPolicy
+        ) == [bufferingPolicy])
         #expect(await mockClient.recordedRequests.map(\.path) == [
             "rooms/lobby/socket"
         ])
@@ -469,4 +480,7 @@ private struct DocumentationChatSocket: WebSocketRequest {
     }
     var subprotocols: [String] { ["chat.v1"] }
     var maximumMessageSize: Int? { 1_048_576 }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        .init(maximumMessages: 64, maximumBytes: 8 * 1_024 * 1_024)
+    }
 }

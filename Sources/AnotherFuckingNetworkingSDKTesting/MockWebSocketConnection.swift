@@ -29,13 +29,16 @@ public typealias MockWebSocketOperation = RecordedWebSocketOperation.Operation
 
 /// A deterministic, actor-isolated test double for a WebSocket connection.
 ///
-/// Incoming messages are consumed in FIFO order. Like the production
-/// connection, the mock accepts only one active receive. Send and ping results
-/// are also consumed in FIFO order, defaulting to success when no result has
-/// been queued.
+/// Injected incoming messages are retained in a bounded FIFO until consumed.
+/// Like the production connection, the mock accepts only one active receive,
+/// preserves messages accepted before terminal closure, and fails rather than
+/// dropping data when its inbound limits are exceeded. Send and ping results
+/// are consumed in FIFO order, defaulting to success when none is queued.
 public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     public nonisolated let url: URL
     public nonisolated let negotiatedSubprotocol: String?
+    public nonisolated let inboundBufferingPolicy:
+        WebSocketInboundBufferingPolicy
 
     /// The connection's current lifecycle state.
     public private(set) var state: WebSocketConnectionState = .open
@@ -79,20 +82,28 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         receiveWaiter == nil ? 0 : 1
     }
 
+    /// Complete messages currently retained for future receive calls.
+    public var bufferedMessageCount: Int {
+        incomingResults.count
+    }
+
+    /// Aggregate UTF-8 text or binary payload bytes currently retained.
+    public private(set) var bufferedByteCount = 0
+
     private var incomingResults: FIFOQueue<
         Result<WebSocketMessage, any Error>
     >
     private var sendResults = FIFOQueue<Result<Void, any Error>>()
     private var pingResults = FIFOQueue<Result<Void, any Error>>()
     private var receiveWaiter: ReceiveWaiter?
-    private var terminalError: (any Error)?
+    private var terminalReceiveError: (any Error)?
     private var nextSequenceID = 0
     private var lifecycleGeneration = 0
     private nonisolated let stateBroadcaster = LatestValueBroadcaster<
         WebSocketConnectionState
     >(.open)
 
-    /// Creates an open mock connection.
+    /// Creates a mock connection with the default inbound buffering policy.
     ///
     /// - Parameters:
     ///   - url: The endpoint exposed by the connection.
@@ -103,9 +114,53 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         negotiatedSubprotocol: String? = nil,
         incoming: [Result<WebSocketMessage, any Error>] = []
     ) {
+        let initial = Self.prepareInitialInbound(
+            incoming,
+            policy: .default
+        )
         self.url = url
         self.negotiatedSubprotocol = negotiatedSubprotocol
-        incomingResults = FIFOQueue(incoming)
+        inboundBufferingPolicy = .default
+        incomingResults = FIFOQueue(initial.results)
+        bufferedByteCount = initial.bufferedByteCount
+        terminalReceiveError = initial.terminalError
+        if initial.terminalError != nil {
+            state = .closed(nil)
+            stateBroadcaster.finish(with: .closed(nil))
+        }
+    }
+
+    /// Creates a mock connection with production-equivalent inbound buffering
+    /// limits.
+    ///
+    /// Both limits must be greater than zero. Initial incoming results are
+    /// accepted in order until a failure or overflow terminalizes the mock.
+    public init(
+        url: URL = URL(string: "wss://mock.invalid")!,
+        negotiatedSubprotocol: String? = nil,
+        inboundBufferingPolicy: WebSocketInboundBufferingPolicy,
+        incoming: [Result<WebSocketMessage, any Error>] = []
+    ) throws {
+        guard inboundBufferingPolicy.maximumMessages > 0,
+              inboundBufferingPolicy.maximumBytes > 0 else {
+            throw WebSocketError.invalidInboundBufferingPolicy(
+                inboundBufferingPolicy
+            )
+        }
+        let initial = Self.prepareInitialInbound(
+            incoming,
+            policy: inboundBufferingPolicy
+        )
+        self.url = url
+        self.negotiatedSubprotocol = negotiatedSubprotocol
+        self.inboundBufferingPolicy = inboundBufferingPolicy
+        incomingResults = FIFOQueue(initial.results)
+        bufferedByteCount = initial.bufferedByteCount
+        terminalReceiveError = initial.terminalError
+        if initial.terminalError != nil {
+            state = .closed(nil)
+            stateBroadcaster.finish(with: .closed(nil))
+        }
     }
 
     // MARK: Queue configuration
@@ -114,13 +169,23 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     public func enqueueIncoming(
         _ result: Result<WebSocketMessage, any Error>
     ) {
-        guard isOpen else { return }
+        guard canAcceptIncoming else { return }
 
-        if let receiveWaiter {
-            self.receiveWaiter = nil
-            receiveWaiter.continuation.resume(with: result)
-        } else {
-            incomingResults.append(result)
+        switch result {
+        case .success(let message):
+            if let receiveWaiter {
+                self.receiveWaiter = nil
+                receiveWaiter.continuation.resume(returning: message)
+            } else if let overflow = buffer(message) {
+                terminalize(
+                    receiveError: WebSocketError.inboundBufferOverflow(
+                        overflow
+                    )
+                )
+            }
+
+        case .failure(let error):
+            terminalize(receiveError: error)
         }
     }
 
@@ -139,8 +204,8 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         enqueueIncoming(.binary(data))
     }
 
-    /// Enqueues one receive failure. Consuming the failure closes the
-    /// connection, matching the production transport.
+    /// Injects one receive failure. The failure immediately closes the mock;
+    /// already accepted messages remain drainable before it is surfaced.
     public func enqueueIncoming(error: any Error) {
         enqueueIncoming(.failure(error))
     }
@@ -170,16 +235,30 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
 
     public func receive() async throws -> WebSocketMessage {
         try cancelIfNeeded()
-        try requireOpen()
+        if case .closing = state {
+            throw WebSocketError.connectionClosing
+        }
         guard receiveWaiter == nil else {
             throw WebSocketError.concurrentReceive
         }
-        record(.receive)
 
         if !incomingResults.isEmpty {
-            return try resolveOperation(incomingResults.popFirst()!)
+            record(.receive)
+            let result = incomingResults.popFirst()!
+            if case .success(let message) = result {
+                bufferedByteCount -= message.inboundBufferedByteCount
+            }
+            return try resolveOperation(result)
         }
 
+        if let terminalReceiveError {
+            throw terminalReceiveError
+        }
+        if case .closed(let close) = state {
+            throw WebSocketError.connectionClosed(close)
+        }
+
+        record(.receive)
         let waiterID = UUID()
         let generation = lifecycleGeneration
         do {
@@ -206,12 +285,16 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         } catch {
             if Task.isCancelled || error is CancellationError {
                 if generation == lifecycleGeneration {
-                    closeAfterOperationFailure(throwing: CancellationError())
+                    closeAfterOperationFailure(
+                        receiveError: WebSocketError.connectionClosed(
+                            closeDetails
+                        )
+                    )
                 }
                 throw CancellationError()
             }
             if generation == lifecycleGeneration {
-                closeAfterOperationFailure(throwing: error)
+                closeAfterOperationFailure(receiveError: error)
             }
             throw error
         }
@@ -240,25 +323,35 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         closeDetails = close
         state = .closing
         stateBroadcaster.publish(.closing)
-        incomingResults.removeAll(keepingCapacity: true)
-        drainReceiveWaiters(throwing: WebSocketError.connectionClosing)
     }
 
     // MARK: Terminal state management
 
-    /// Finishes the connection and rejects pending and future I/O as closed.
+    /// Finishes the connection. Accepted messages remain drainable before
+    /// pending and future receive calls observe closure.
     public func finish(with close: WebSocketClose? = nil) {
-        guard terminalError == nil else { return }
-        guard !isClosed else { return }
-
         let finalClose = close ?? closeDetails
+        if isClosed {
+            guard let finalClose, closeDetails != finalClose else { return }
+            closeDetails = finalClose
+            terminalReceiveError = Self.terminalError(
+                preserving: terminalReceiveError,
+                close: finalClose
+            )
+            state = .closed(finalClose)
+            stateBroadcaster.finish(with: .closed(finalClose))
+            return
+        }
+
         closeDetails = finalClose
         state = .closed(finalClose)
+        let receiveError = WebSocketError.connectionClosed(finalClose)
+        if terminalReceiveError == nil {
+            terminalReceiveError = receiveError
+        }
         stateBroadcaster.finish(with: .closed(finalClose))
-        clearQueuedResults()
-        drainReceiveWaiters(
-            throwing: WebSocketError.connectionClosed(finalClose)
-        )
+        clearQueuedOperationResults()
+        drainReceiveWaiters(throwing: terminalReceiveError ?? receiveError)
     }
 
     /// Finishes using a close code and optional binary reason.
@@ -269,17 +362,11 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         finish(with: WebSocketClose(code: code, reason: reason))
     }
 
-    /// Fails the connection and uses the same terminal error for pending and
-    /// future I/O.
+    /// Fails the connection. Accepted messages drain before the error is used
+    /// for pending and future receive calls.
     public func fail(with error: any Error) {
-        guard terminalError == nil else { return }
         guard !isClosed else { return }
-
-        terminalError = error
-        state = .closed(closeDetails)
-        stateBroadcaster.finish(with: .closed(closeDetails))
-        clearQueuedResults()
-        drainReceiveWaiters(throwing: error)
+        terminalize(receiveError: error)
     }
 
     /// Clears only the unified operation history. Sequence IDs remain
@@ -297,7 +384,7 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
         drainReceiveWaiters(throwing: CancellationError())
         clearQueuedResults()
         clearRecordedOperations()
-        terminalError = nil
+        terminalReceiveError = nil
         closeDetails = nil
         state = .open
         stateBroadcaster.reset(to: .open)
@@ -306,9 +393,17 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     // MARK: Private helpers
 
     private var isOpen: Bool {
-        guard terminalError == nil else { return false }
         if case .open = state { return true }
         return false
+    }
+
+    private var canAcceptIncoming: Bool {
+        switch state {
+        case .open, .closing:
+            return terminalReceiveError == nil
+        case .closed:
+            return false
+        }
     }
 
     private var isClosed: Bool {
@@ -317,10 +412,6 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
     }
 
     private func requireOpen() throws {
-        if let terminalError {
-            throw terminalError
-        }
-
         switch state {
         case .open:
             return
@@ -348,26 +439,31 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
             return value
         } catch {
             if Task.isCancelled || error is CancellationError {
-                closeAfterOperationFailure(throwing: CancellationError())
+                closeAfterOperationFailure(
+                    receiveError: WebSocketError.connectionClosed(closeDetails)
+                )
                 throw CancellationError()
             }
-            closeAfterOperationFailure(throwing: error)
+            closeAfterOperationFailure(receiveError: error)
             throw error
         }
     }
 
     private func cancelIfNeeded() throws {
         guard Task.isCancelled else { return }
-        closeAfterOperationFailure(throwing: CancellationError())
+        closeAfterOperationFailure(
+            receiveError: WebSocketError.connectionClosed(closeDetails)
+        )
         throw CancellationError()
     }
 
-    private func closeAfterOperationFailure(throwing error: any Error) {
-        guard isOpen else { return }
+    private func closeAfterOperationFailure(receiveError: any Error) {
+        guard !isClosed else { return }
+        terminalReceiveError = receiveError
         state = .closed(closeDetails)
         stateBroadcaster.finish(with: .closed(closeDetails))
-        clearQueuedResults()
-        drainReceiveWaiters(throwing: error)
+        clearQueuedOperationResults()
+        drainReceiveWaiters(throwing: receiveError)
     }
 
     private func cancelReceive(_ id: UUID) {
@@ -375,9 +471,10 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
             return
         }
         self.receiveWaiter = nil
+        terminalReceiveError = WebSocketError.connectionClosed(closeDetails)
         state = .closed(closeDetails)
         stateBroadcaster.finish(with: .closed(closeDetails))
-        clearQueuedResults()
+        clearQueuedOperationResults()
         receiveWaiter.continuation.resume(throwing: CancellationError())
     }
 
@@ -389,8 +486,102 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
 
     private func clearQueuedResults() {
         incomingResults.removeAll(keepingCapacity: true)
+        bufferedByteCount = 0
+        clearQueuedOperationResults()
+    }
+
+    private func clearQueuedOperationResults() {
         sendResults.removeAll(keepingCapacity: true)
         pingResults.removeAll(keepingCapacity: true)
+    }
+
+    private func buffer(
+        _ message: WebSocketMessage
+    ) -> WebSocketInboundBufferOverflow? {
+        let byteCount = message.inboundBufferedByteCount
+        let exceedsMessages = incomingResults.count
+            >= inboundBufferingPolicy.maximumMessages
+        let exceedsBytes = byteCount > inboundBufferingPolicy.maximumBytes
+            || bufferedByteCount
+                > inboundBufferingPolicy.maximumBytes - byteCount
+        if exceedsMessages || exceedsBytes {
+            return WebSocketInboundBufferOverflow(
+                policy: inboundBufferingPolicy,
+                bufferedMessageCount: incomingResults.count,
+                bufferedByteCount: bufferedByteCount,
+                incomingMessageByteCount: byteCount
+            )
+        }
+
+        incomingResults.append(.success(message))
+        bufferedByteCount += byteCount
+        return nil
+    }
+
+    private func terminalize(receiveError: any Error) {
+        guard !isClosed else { return }
+        terminalReceiveError = receiveError
+        state = .closed(closeDetails)
+        stateBroadcaster.finish(with: .closed(closeDetails))
+        clearQueuedOperationResults()
+        drainReceiveWaiters(throwing: receiveError)
+    }
+
+    private static func terminalError(
+        preserving existing: (any Error)?,
+        close: WebSocketClose?
+    ) -> any Error {
+        if let webSocketError = existing as? WebSocketError,
+           case .inboundBufferOverflow = webSocketError {
+            return webSocketError
+        }
+        return WebSocketError.connectionClosed(close)
+    }
+
+    private static func prepareInitialInbound(
+        _ incoming: [Result<WebSocketMessage, any Error>],
+        policy: WebSocketInboundBufferingPolicy
+    ) -> InitialInbound {
+        var results: [Result<WebSocketMessage, any Error>] = []
+        results.reserveCapacity(min(incoming.count, policy.maximumMessages))
+        var bufferedByteCount = 0
+        var terminalError: (any Error)?
+
+        for result in incoming {
+            switch result {
+            case .success(let message):
+                let byteCount = message.inboundBufferedByteCount
+                let exceedsMessages = results.count >= policy.maximumMessages
+                let exceedsBytes = byteCount > policy.maximumBytes
+                    || bufferedByteCount > policy.maximumBytes - byteCount
+                if exceedsMessages || exceedsBytes {
+                    terminalError = WebSocketError.inboundBufferOverflow(
+                        WebSocketInboundBufferOverflow(
+                            policy: policy,
+                            bufferedMessageCount: results.count,
+                            bufferedByteCount: bufferedByteCount,
+                            incomingMessageByteCount: byteCount
+                        )
+                    )
+                } else {
+                    results.append(result)
+                    bufferedByteCount += byteCount
+                }
+
+            case .failure(let error):
+                terminalError = error
+            }
+
+            if terminalError != nil {
+                break
+            }
+        }
+
+        return InitialInbound(
+            results: results,
+            bufferedByteCount: bufferedByteCount,
+            terminalError: terminalError
+        )
     }
 
     private static func validatedClose(
@@ -418,8 +609,25 @@ public actor MockWebSocketConnection: WebSocketConnectionProtocol {
 }
 
 private extension MockWebSocketConnection {
+    struct InitialInbound {
+        let results: [Result<WebSocketMessage, any Error>]
+        let bufferedByteCount: Int
+        let terminalError: (any Error)?
+    }
+
     struct ReceiveWaiter {
         let id: UUID
         let continuation: CheckedContinuation<WebSocketMessage, any Error>
+    }
+}
+
+private extension WebSocketMessage {
+    var inboundBufferedByteCount: Int {
+        switch self {
+        case .text(let text):
+            return text.utf8.count
+        case .binary(let data):
+            return data.count
+        }
     }
 }

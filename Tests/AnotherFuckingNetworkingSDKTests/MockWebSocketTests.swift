@@ -73,6 +73,86 @@ struct MockWebSocketClientTests {
         #expect(records.map { $0.headers["x-signature"] } == ["one", "two"])
         #expect(records.map(\.subprotocols) == [["chat.v1"], ["chat.v1"]])
         #expect(records.map(\.maximumMessageSize) == [128, 256])
+        #expect(records.map(\.inboundBufferingPolicy) == [
+            .default, .default
+        ])
+    }
+
+    @Test("Exact stubs and records distinguish inbound buffering policies")
+    func exactBufferingPolicyMatching() async throws {
+        let compact = WebSocketInboundBufferingPolicy(
+            maximumMessages: 2,
+            maximumBytes: 128
+        )
+        let spacious = WebSocketInboundBufferingPolicy(
+            maximumMessages: 8,
+            maximumBytes: 4_096
+        )
+        let compactRequest = MockSocketRequest(
+            value: "same",
+            maximumSize: 512,
+            bufferingPolicy: compact
+        )
+        let spaciousRequest = MockSocketRequest(
+            value: "same",
+            maximumSize: 512,
+            bufferingPolicy: spacious
+        )
+        let compactConnection = MockWebSocketConnection(
+            url: URL(string: "wss://mock.invalid/compact")!
+        )
+        let spaciousConnection = MockWebSocketConnection(
+            url: URL(string: "wss://mock.invalid/spacious")!
+        )
+        let mock = MockWebSocketClient()
+
+        try await mock.stub(compactRequest, with: compactConnection)
+        try await mock.stub(spaciousRequest, with: spaciousConnection)
+
+        #expect(try await mock.connect(compactRequest).url
+            == compactConnection.url)
+        #expect(try await mock.connect(spaciousRequest).url
+            == spaciousConnection.url)
+        #expect(await mock.recordedRequests.map(\.inboundBufferingPolicy)
+            == [compact, spacious])
+    }
+
+    @Test("Exact registration and connection snapshot options once each")
+    func requestOptionsAreSnapshottedOnce() async throws {
+        let request = CountingMockSocketRequest()
+        let connection = MockWebSocketConnection()
+        let mock = MockWebSocketClient()
+
+        try await mock.stub(request, with: connection)
+        #expect(request.readCounts == .init(
+            maximumMessageSize: 1,
+            inboundBufferingPolicy: 1
+        ))
+
+        _ = try await mock.connect(request)
+        #expect(request.readCounts == .init(
+            maximumMessageSize: 2,
+            inboundBufferingPolicy: 2
+        ))
+    }
+
+    @Test("The legacy request record initializer retains default limits")
+    func legacyRequestRecordInitializer() throws {
+        let url = try #require(URL(string: "wss://mock.invalid/socket"))
+        let record = RecordedWebSocketRequest(
+            sequenceID: 0,
+            requestTypeID: ObjectIdentifier(MockSocketRequest.self),
+            requestTypeName: "MockSocketRequest",
+            urlRequest: URLRequest(url: url),
+            url: url,
+            path: "socket",
+            queryItems: [],
+            headers: [:],
+            subprotocols: [],
+            maximumMessageSize: nil
+        )
+
+        #expect(record.inboundBufferingPolicy == .default)
     }
 
     @Test("Factories run for every connection")
@@ -148,6 +228,162 @@ struct MockWebSocketClientTests {
 
 @Suite("MockWebSocketConnection")
 struct MockWebSocketConnectionTests {
+    @Test("Legacy and validating initializers expose stable policies")
+    func bufferingPolicyInitializers() async throws {
+        let legacy = MockWebSocketConnection()
+        #expect(legacy.inboundBufferingPolicy == .default)
+
+        let custom = WebSocketInboundBufferingPolicy(
+            maximumMessages: 3,
+            maximumBytes: 2_048
+        )
+        let configured = try MockWebSocketConnection(
+            inboundBufferingPolicy: custom
+        )
+        #expect(configured.inboundBufferingPolicy == custom)
+
+        for invalid in [
+            WebSocketInboundBufferingPolicy(
+                maximumMessages: 0,
+                maximumBytes: 1
+            ),
+            WebSocketInboundBufferingPolicy(
+                maximumMessages: 1,
+                maximumBytes: 0
+            ),
+        ] {
+            do {
+                _ = try MockWebSocketConnection(
+                    inboundBufferingPolicy: invalid
+                )
+                Issue.record("Expected invalid buffering policy")
+            } catch let error as WebSocketError {
+                guard case .invalidInboundBufferingPolicy(let policy) =
+                    error else {
+                    Issue.record("Expected invalid policy, got \(error)")
+                    continue
+                }
+                #expect(policy == invalid)
+            }
+        }
+    }
+
+    @Test("Initial overflow preserves its accepted prefix")
+    func initialOverflowPreservesPrefix() async throws {
+        let policy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 2,
+            maximumBytes: 1_024
+        )
+        let accepted: [WebSocketMessage] = [
+            .text("one"),
+            .binary(Data([0x02, 0x03])),
+        ]
+        let mock = try MockWebSocketConnection(
+            inboundBufferingPolicy: policy,
+            incoming: (accepted + [.text("rejected")]).map {
+                .success($0)
+            }
+        )
+
+        #expect(await mock.state == .closed(nil))
+        #expect(await mock.bufferedMessageCount == 2)
+        #expect(await mock.bufferedByteCount == 5)
+        #expect(try await mock.receive() == accepted[0])
+        #expect(try await mock.receive() == accepted[1])
+
+        do {
+            _ = try await mock.receive()
+            Issue.record("Expected inbound overflow")
+        } catch let error as WebSocketError {
+            guard case .inboundBufferOverflow(let overflow) = error else {
+                Issue.record("Expected inbound overflow, got \(error)")
+                return
+            }
+            #expect(overflow == WebSocketInboundBufferOverflow(
+                policy: policy,
+                bufferedMessageCount: 2,
+                bufferedByteCount: 5,
+                incomingMessageByteCount: 8
+            ))
+        }
+        #expect(await mock.bufferedMessageCount == 0)
+        #expect(await mock.bufferedByteCount == 0)
+    }
+
+    @Test("Enqueued byte overflow counts UTF-8 and binary payloads")
+    func enqueuedByteOverflow() async throws {
+        let policy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 4,
+            maximumBytes: 5
+        )
+        let mock = try MockWebSocketConnection(
+            inboundBufferingPolicy: policy
+        )
+        await mock.enqueueIncoming(text: "é")
+        await mock.enqueueIncoming(data: Data([0x01, 0x02, 0x03]))
+        await mock.enqueueIncoming(text: "!")
+
+        #expect(await mock.state == .closed(nil))
+        #expect(await mock.bufferedMessageCount == 2)
+        #expect(await mock.bufferedByteCount == 5)
+        #expect(try await mock.receive() == .text("é"))
+        #expect(try await mock.receive() == .binary(
+            Data([0x01, 0x02, 0x03])
+        ))
+
+        let expectedOverflow = WebSocketInboundBufferOverflow(
+            policy: policy,
+            bufferedMessageCount: 2,
+            bufferedByteCount: 5,
+            incomingMessageByteCount: 1
+        )
+        for _ in 0..<2 {
+            do {
+                _ = try await mock.receive()
+                Issue.record("Expected stable inbound overflow")
+            } catch let error as WebSocketError {
+                guard case .inboundBufferOverflow(let overflow) = error else {
+                    Issue.record("Expected inbound overflow, got \(error)")
+                    continue
+                }
+                #expect(overflow == expectedOverflow)
+            }
+        }
+
+        let lateClose = WebSocketClose(code: .policyViolation)
+        await mock.finish(with: lateClose)
+        #expect(await mock.state == .closed(lateClose))
+        do {
+            _ = try await mock.receive()
+            Issue.record("Expected overflow after close refinement")
+        } catch let error as WebSocketError {
+            guard case .inboundBufferOverflow(let overflow) = error else {
+                Issue.record("Expected inbound overflow, got \(error)")
+                return
+            }
+            #expect(overflow == expectedOverflow)
+        }
+    }
+
+    @Test("A waiting receiver bypasses aggregate retention limits")
+    func directDeliveryBypassesLimits() async throws {
+        let mock = try MockWebSocketConnection(
+            inboundBufferingPolicy: .init(
+                maximumMessages: 1,
+                maximumBytes: 1
+            )
+        )
+        let receive = Task { try await mock.receive() }
+        await expectPendingReceives(1, on: mock)
+
+        await mock.enqueueIncoming(text: "larger than the buffer")
+
+        #expect(try await receive.value == .text("larger than the buffer"))
+        #expect(await mock.state == .open)
+        #expect(await mock.bufferedMessageCount == 0)
+        #expect(await mock.bufferedByteCount == 0)
+    }
+
     @Test("Incoming messages are FIFO and concurrent receives match production")
     func receiveFIFOAndConcurrencyParity() async throws {
         let mock = MockWebSocketConnection()
@@ -237,7 +473,7 @@ struct MockWebSocketConnectionTests {
         #expect(await mock.state == .closing)
     }
 
-    @Test("Close validates inputs, records details, and drains receivers")
+    @Test("Close validates inputs and pending receives await peer completion")
     func closeLifecycle() async throws {
         let mock = MockWebSocketConnection()
         let receive = Task { try await mock.receive() }
@@ -263,14 +499,32 @@ struct MockWebSocketConnectionTests {
             code: .normalClosure,
             reason: Data("Done".utf8)
         ))
+
         do {
-            _ = try await receive.value
-            Issue.record("Expected closing error")
+            _ = try await mock.receive()
+            Issue.record("Expected a new receive to reject closing state")
         } catch let error as WebSocketError {
             guard case .connectionClosing = error else {
                 Issue.record("Expected connectionClosing, got \(error)")
                 return
             }
+        }
+
+        #expect(await mock.pendingReceiveCount == 1)
+        let peerClose = WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        )
+        await mock.finish(with: peerClose)
+        do {
+            _ = try await receive.value
+            Issue.record("Expected peer closure")
+        } catch let error as WebSocketError {
+            guard case .connectionClosed(let close) = error else {
+                Issue.record("Expected connectionClosed, got \(error)")
+                return
+            }
+            #expect(close == peerClose)
         }
     }
 
@@ -360,6 +614,55 @@ struct MockWebSocketConnectionTests {
         )))
     }
 
+    @Test("Normal finish and failure preserve buffered prefixes")
+    func terminalStatesPreserveBufferedPrefixes() async throws {
+        let cleanMessages: [WebSocketMessage] = [
+            .text("clean-one"),
+            .binary(Data([0xca, 0xfe])),
+        ]
+        let clean = MockWebSocketConnection(
+            incoming: cleanMessages.map { .success($0) }
+        )
+        await clean.finish(with: .normalClosure)
+        var cleanIterator = clean.messages.makeAsyncIterator()
+        #expect(try await cleanIterator.next() == cleanMessages[0])
+        #expect(try await cleanIterator.next() == cleanMessages[1])
+        #expect(try await cleanIterator.next() == nil)
+
+        let failedMessages: [WebSocketMessage] = [
+            .text("failed-one"),
+            .text("failed-two"),
+        ]
+        let failed = MockWebSocketConnection(
+            incoming: failedMessages.map { .success($0) }
+        )
+        await failed.fail(with: MockSocketFixtureError.terminal)
+        #expect(try await failed.receive() == failedMessages[0])
+        #expect(try await failed.receive() == failedMessages[1])
+        do {
+            _ = try await failed.receive()
+            Issue.record("Expected terminal failure after buffered prefix")
+        } catch let error as MockSocketFixtureError {
+            #expect(error == .terminal)
+        }
+
+        let initiallyFailed = MockWebSocketConnection(incoming: [
+            .success(.text("before-initial-failure")),
+            .failure(MockSocketFixtureError.terminal),
+            .success(.text("ignored-after-failure")),
+        ])
+        #expect(await initiallyFailed.state == .closed(nil))
+        #expect(await initiallyFailed.bufferedMessageCount == 1)
+        #expect(try await initiallyFailed.receive()
+            == .text("before-initial-failure"))
+        do {
+            _ = try await initiallyFailed.receive()
+            Issue.record("Expected the initial terminal failure")
+        } catch let error as MockSocketFixtureError {
+            #expect(error == .terminal)
+        }
+    }
+
     @Test("Failure drains receivers and is reused by future operations")
     func terminalFailure() async throws {
         let mock = MockWebSocketConnection()
@@ -378,6 +681,31 @@ struct MockWebSocketConnectionTests {
             } catch let error as MockSocketFixtureError {
                 #expect(error == .terminal)
             }
+        }
+    }
+
+    @Test("Late peer close details refine non-overflow receive failures")
+    func lateCloseRefinesTerminalReceiveFailure() async throws {
+        let mock = MockWebSocketConnection()
+        await mock.fail(with: MockSocketFixtureError.terminal)
+
+        let peerClose = WebSocketClose(
+            code: .goingAway,
+            reason: Data("peer shutdown".utf8)
+        )
+        await mock.finish(with: peerClose)
+
+        #expect(await mock.state == .closed(peerClose))
+        #expect(await mock.closeDetails == peerClose)
+        do {
+            _ = try await mock.receive()
+            Issue.record("Expected refined peer closure")
+        } catch let error as WebSocketError {
+            guard case .connectionClosed(let close) = error else {
+                Issue.record("Expected connectionClosed, got \(error)")
+                return
+            }
+            #expect(close == peerClose)
         }
     }
 
@@ -404,6 +732,32 @@ struct MockWebSocketConnectionTests {
         #expect(try await mock.receive() == .text("after"))
     }
 
+    @Test("Reset clears buffered terminal state and retains policy")
+    func resetRetainsBufferingPolicy() async throws {
+        let policy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 2,
+            maximumBytes: 4
+        )
+        let mock = try MockWebSocketConnection(
+            inboundBufferingPolicy: policy
+        )
+        await mock.enqueueIncoming(text: "é")
+        await mock.enqueueIncoming(error: MockSocketFixtureError.terminal)
+
+        #expect(await mock.state == .closed(nil))
+        #expect(await mock.bufferedMessageCount == 1)
+        #expect(await mock.bufferedByteCount == 2)
+
+        await mock.reset()
+
+        #expect(mock.inboundBufferingPolicy == policy)
+        #expect(await mock.state == .open)
+        #expect(await mock.bufferedMessageCount == 0)
+        #expect(await mock.bufferedByteCount == 0)
+        await mock.enqueueIncoming(text: "ok")
+        #expect(try await mock.receive() == .text("ok"))
+    }
+
     @Test("Unified records preserve cross-operation order")
     func unifiedOperationOrder() async throws {
         let mock = MockWebSocketConnection()
@@ -427,6 +781,7 @@ struct MockWebSocketConnectionTests {
 private struct MockSocketRequest: WebSocketRequest {
     let value: String
     var maximumSize: Int? = nil
+    var bufferingPolicy: WebSocketInboundBufferingPolicy = .default
 
     var path: String { "socket" }
     var queryItems: [URLQueryItem]? {
@@ -434,6 +789,9 @@ private struct MockSocketRequest: WebSocketRequest {
     }
     var subprotocols: [String] { ["chat.v1"] }
     var maximumMessageSize: Int? { maximumSize }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        bufferingPolicy
+    }
 
     func customize(_ request: inout URLRequest) throws {
         request.setValue(value, forHTTPHeaderField: "X-Signature")
@@ -448,6 +806,46 @@ private struct MockSocketRequest: WebSocketRequest {
             URLQueryItem(name: "signed", value: value)
         ]
         request.url = components.url
+    }
+}
+
+private final class CountingMockSocketRequest:
+    WebSocketRequest,
+    @unchecked Sendable {
+    struct ReadCounts: Equatable, Sendable {
+        let maximumMessageSize: Int
+        let inboundBufferingPolicy: Int
+    }
+
+    private struct State {
+        var maximumMessageSize = 0
+        var inboundBufferingPolicy = 0
+    }
+
+    let path = "socket"
+    private let state = LockedBox(State())
+
+    var maximumMessageSize: Int? {
+        state.withLock { state in
+            state.maximumMessageSize += 1
+            return 1_024
+        }
+    }
+
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        state.withLock { state in
+            state.inboundBufferingPolicy += 1
+            return .init(maximumMessages: 4, maximumBytes: 4_096)
+        }
+    }
+
+    var readCounts: ReadCounts {
+        state.withLock { state in
+            ReadCounts(
+                maximumMessageSize: state.maximumMessageSize,
+                inboundBufferingPolicy: state.inboundBufferingPolicy
+            )
+        }
     }
 }
 

@@ -42,9 +42,9 @@ public extension APIClientTransferProtocol {
     }
 }
 
-struct WebSocketTransportConfiguration: Sendable {
-    let maximumMessageSize: Int?
-    let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+package struct WebSocketTransportConfiguration: Sendable {
+    package let maximumMessageSize: Int?
+    package let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
 }
 
 typealias WebSocketTransportFactory = @Sendable (

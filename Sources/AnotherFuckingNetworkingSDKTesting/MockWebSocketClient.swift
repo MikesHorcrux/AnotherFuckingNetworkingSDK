@@ -29,6 +29,9 @@ public struct RecordedWebSocketRequest: Equatable, Sendable {
     /// The requested maximum received message size.
     public let maximumMessageSize: Int?
 
+    /// Aggregate inbound buffering limits requested for the connection.
+    public let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+
     /// Creates a structured record of one mock WebSocket invocation.
     public init(
         sequenceID: Int,
@@ -42,6 +45,35 @@ public struct RecordedWebSocketRequest: Equatable, Sendable {
         subprotocols: [String],
         maximumMessageSize: Int?
     ) {
+        self.init(
+            sequenceID: sequenceID,
+            requestTypeID: requestTypeID,
+            requestTypeName: requestTypeName,
+            urlRequest: urlRequest,
+            url: url,
+            path: path,
+            queryItems: queryItems,
+            headers: headers,
+            subprotocols: subprotocols,
+            maximumMessageSize: maximumMessageSize,
+            inboundBufferingPolicy: .default
+        )
+    }
+
+    /// Creates a record including the request's inbound buffering limits.
+    public init(
+        sequenceID: Int,
+        requestTypeID: ObjectIdentifier,
+        requestTypeName: String,
+        urlRequest: URLRequest,
+        url: URL,
+        path: String,
+        queryItems: [URLQueryItem],
+        headers: [String: String],
+        subprotocols: [String],
+        maximumMessageSize: Int?,
+        inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+    ) {
         self.sequenceID = sequenceID
         self.requestTypeID = requestTypeID
         self.requestTypeName = requestTypeName
@@ -52,6 +84,7 @@ public struct RecordedWebSocketRequest: Equatable, Sendable {
         self.headers = headers
         self.subprotocols = subprotocols
         self.maximumMessageSize = maximumMessageSize
+        self.inboundBufferingPolicy = inboundBufferingPolicy
     }
 }
 
@@ -289,11 +322,13 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
     private func makeContext<R: WebSocketRequest>(
         for request: R
     ) throws -> RequestContext {
-        let urlRequest = try WebSocketRequestBuilder.make(
+        let path = request.path
+        let preparedRequest = try WebSocketRequestBuilder.prepare(
             request,
             baseURL: baseURL,
             globalHeaders: globalHeaders
         )
+        let urlRequest = preparedRequest.urlRequest
         guard let url = urlRequest.url else {
             throw WebSocketError.invalidURL
         }
@@ -301,10 +336,20 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
         return RequestContext(
             urlRequest: urlRequest,
             url: url,
+            path: path,
+            subprotocols: preparedRequest.subprotocols,
+            maximumMessageSize:
+                preparedRequest.transportConfiguration.maximumMessageSize,
+            inboundBufferingPolicy:
+                preparedRequest.transportConfiguration.inboundBufferingPolicy,
             signature: Signature(
                 urlRequest: urlRequest,
-                maximumMessageSize: request.maximumMessageSize,
-                subprotocols: request.subprotocols
+                maximumMessageSize:
+                    preparedRequest.transportConfiguration.maximumMessageSize,
+                inboundBufferingPolicy:
+                    preparedRequest.transportConfiguration
+                        .inboundBufferingPolicy,
+                subprotocols: preparedRequest.subprotocols
             )
         )
     }
@@ -320,7 +365,7 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
             requestTypeName: String(reflecting: R.self),
             urlRequest: context.urlRequest,
             url: context.url,
-            path: request.path,
+            path: context.path,
             queryItems: URLComponents(
                 url: context.url,
                 resolvingAgainstBaseURL: false
@@ -328,8 +373,9 @@ public actor MockWebSocketClient: WebSocketClientProtocol {
             headers: Self.normalizedHeaders(
                 context.urlRequest.allHTTPHeaderFields ?? [:]
             ),
-            subprotocols: request.subprotocols,
-            maximumMessageSize: request.maximumMessageSize
+            subprotocols: context.subprotocols,
+            maximumMessageSize: context.maximumMessageSize,
+            inboundBufferingPolicy: context.inboundBufferingPolicy
         )
         nextSequenceID += 1
         recordedRequests.append(invocation)
@@ -369,12 +415,17 @@ private extension MockWebSocketClient {
     struct RequestContext: Sendable {
         let urlRequest: URLRequest
         let url: URL
+        let path: String
+        let subprotocols: [String]
+        let maximumMessageSize: Int?
+        let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
         let signature: Signature
     }
 
     struct Signature: Equatable, Sendable {
         let urlRequest: URLRequest
         let maximumMessageSize: Int?
+        let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
         let subprotocols: [String]
     }
 }
