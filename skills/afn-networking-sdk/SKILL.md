@@ -116,7 +116,9 @@ convenience task is durable.
 Keep one receive owner. Preserve FIFO order with a bounded buffer and fail
 closed on overflow. Do not add automatic reconnect or heartbeat behavior to
 the base connection; use `WebSocketReliabilityClient` when bounded retry and
-session restoration are explicitly desired. See
+session restoration are explicitly desired. Prefer `restorerWithContext` when
+a server cursor or session token needs the reconnect attempt and prior
+subprotocol. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
 
 ### Request coalescing

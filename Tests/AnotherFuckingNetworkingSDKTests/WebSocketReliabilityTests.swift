@@ -83,6 +83,49 @@ struct WebSocketReliabilityTests {
         #expect(await second.sentMessages == [.text("hello")])
     }
 
+    @Test("Contextual restoration receives the reconnect attempt and prior session")
+    func contextualRestoration() async throws {
+        let first = MockWebSocketConnection()
+        await first.enqueueIncoming(error: WebSocketError.connectionClosed(nil))
+        let second = MockWebSocketConnection(
+            incoming: [.success(.text("restored"))]
+        )
+        let handshakes = LockedBox(0)
+        let context = LockedBox<WebSocketReconnectContext?>(nil)
+        let mock = MockWebSocketClient()
+        await mock.stub(ReliabilitySocketRequest.self) { _ in
+            let handshake = handshakes.withLock { value in
+                value += 1
+                return value
+            }
+            return handshake == 1 ? first : second
+        }
+
+        let client = WebSocketReliabilityClient(
+            client: mock,
+            policy: WebSocketReliabilityPolicy(
+                maximumReconnectAttempts: 1,
+                initialBackoffNanoseconds: 0,
+                jitterRatio: 0
+            ),
+            sleeper: { _ in },
+            random: { 0.5 },
+            restorerWithContext: { _, value in
+                context.withLock { $0 = value }
+            }
+        )
+        let connection = try await client.connect(
+            ReliabilitySocketRequest(value: "room")
+        )
+
+        #expect(try await connection.receive() == .text("restored"))
+        #expect(context.withLock { $0 } == WebSocketReconnectContext(
+            attempt: 1,
+            previousURL: first.url,
+            previousSubprotocol: first.negotiatedSubprotocol
+        ))
+    }
+
     @Test("Heartbeat policy is bounded and rejects invalid values")
     func policyNormalization() {
         let policy = WebSocketReliabilityPolicy(
