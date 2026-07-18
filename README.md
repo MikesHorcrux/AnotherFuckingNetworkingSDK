@@ -865,6 +865,33 @@ try await typedRecovery.save(Checkpoint(cursor: "cursor-42", version: 42))
 The JSON codec rejects malformed payloads and preserves the same 64 KiB bound;
 it does not make product-specific replay or authentication decisions.
 
+For typed application messages, keep serialization separate from transport
+ownership with `WebSocketMessageCodec`:
+
+```swift
+struct ChatEvent: Codable, Sendable {
+    let kind: String
+    let sequence: Int
+}
+
+let codec = JSONWebSocketMessageCodec<ChatEvent>()
+try await connection.send(
+    ChatEvent(kind: "subscribe", sequence: 1),
+    using: codec
+)
+
+let event = try await connection.receive(ChatEvent.self, using: codec)
+for try await event in connection.decodedMessages(using: codec) {
+    print(event.kind, event.sequence)
+}
+```
+
+`JSONWebSocketMessageCodec` emits sorted-key text JSON by default and can emit
+binary JSON with `encoding: .binary`. Decoding accepts either representation.
+The typed sequence preserves the connection's bounded FIFO, cancellation, and
+normal/abnormal close semantics; it does not create a second receive pump.
+See [Typed WebSocket messages](docs/websocket-messages.md).
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:

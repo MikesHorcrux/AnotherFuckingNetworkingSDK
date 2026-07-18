@@ -108,6 +108,9 @@ Policies are values or wrappers, not hidden global switches:
 - JSONWebSocketRecoveryAdapter adds an opt-in `Codable` seam over that opaque
   state; deterministic encoding and bounded decoding remain separate from
   reconnect and message replay policy.
+- WebSocketMessageCodec adds an opt-in typed value seam over complete text or
+  binary messages. Its decoded sequence delegates to the existing bounded FIFO
+  and never creates a second receive pump.
 - ServerSentEventStream is a bounded framing adapter over HTTPByteStream;
   status/retry decisions stay in the HTTP layer while event parsing remains
   single-pass and cancellation-owned by the consumer.
