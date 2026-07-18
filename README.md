@@ -228,6 +228,12 @@ This is single-flight only: completed responses are not retained, and cancelled
 waiters do not cancel work still needed by other callers. See
 [Request coalescing](docs/request-coalescing.md) for lifecycle details.
 
+For bounded response reuse, add `CachedAPIClient` with a caller-owned key and
+explicit TTL/size limits. It stores only successful responses and never
+invalidates mutations implicitly; call `invalidate(_:)` after a write. See
+[Response caching](docs/response-caching.md) for composition and validator
+guidance.
+
 ## Streaming HTTP responses
 
 Use `stream(_:)` when a response is large, long-lived, or naturally consumed

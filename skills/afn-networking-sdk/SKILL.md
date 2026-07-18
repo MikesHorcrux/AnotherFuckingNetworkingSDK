@@ -57,6 +57,8 @@ source and tests before relying on any example below.
   `NetworkTelemetryExporter`; keep exporters lightweight and vendor-neutral.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
+- Response caching: `CachedAPIClient` and `ResponseCachePolicy`; bounded
+  caller-keyed TTL/LRU storage with explicit invalidation.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
@@ -110,6 +112,13 @@ Wrap a response-capable client in `RequestCoalescingAPIClient` for duplicate
 concurrent reads. Make the key include request type, URL inputs, auth scope,
 and feature flags; return `nil` when an operation must always execute. This is
 single-flight only, not a response cache.
+
+### Response caching
+
+Use `CachedAPIClient` only for explicitly cacheable successful reads. Include
+request type, URL inputs, auth scope, locale, and feature flags in the key;
+invalidate after successful writes. Treat conditional validators and `304`
+handling as application policy until the dedicated adapter lands.
 
 ### Tests and release gates
 

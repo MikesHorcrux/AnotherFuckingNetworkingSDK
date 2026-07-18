@@ -17,6 +17,7 @@ these pages explain decisions, lifecycle contracts, and operational tradeoffs.
 | Export operation metrics safely | [Telemetry and metrics](telemetry.md) |
 | Add reconnect and heartbeat policy | [WebSocket reliability](websocket-reliability.md) |
 | Share duplicate concurrent reads | [Request coalescing](request-coalescing.md) |
+| Add bounded response caching | [Response caching](response-caching.md) |
 | Review secrets, TLS, redaction, and pinning | [Security](security.md) |
 | Test, benchmark, release, and review changes | [Testing and release](testing-and-release.md) |
 | Track planned capability modules | [Roadmap](roadmap.md) |
