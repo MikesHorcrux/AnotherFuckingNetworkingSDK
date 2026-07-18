@@ -219,6 +219,31 @@ struct BackgroundURLSessionTests {
         }
     }
 
+    @Test("Validated downloads reject malformed resume data before task creation")
+    func validatedDownloadRejectsMalformedData() throws {
+        let adapter = BackgroundURLSessionAdapter(
+            identifier: "com.anotherfuckingnetworkingsdk.validation.\(UUID())"
+        ) { _ in }
+        defer { adapter.invalidateAndCancel() }
+
+        let request = URLRequest(
+            url: URL(string: "https://example.com/large-file")!
+        )
+        do {
+            _ = try adapter.downloadValidated(
+                request,
+                resumeData: Data([0, 1, 2]),
+                mode: .propertyList
+            )
+            Issue.record("Expected malformed resume data to be rejected")
+        } catch let error as BackgroundTransferResumeDataValidationError {
+            #expect(error == .malformedPropertyList)
+        }
+
+        let task = try adapter.downloadValidated(request)
+        task.cancel()
+    }
+
     @Test("Background task controls report missing relaunch tasks")
     func missingTaskControls() async throws {
         let adapter = BackgroundURLSessionAdapter(

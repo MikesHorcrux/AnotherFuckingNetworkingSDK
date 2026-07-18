@@ -351,6 +351,26 @@ public final class BackgroundURLSessionAdapter: Sendable {
         return task
     }
 
+    /// Validates optional resume data before creating a Foundation download
+    /// task. Use `.propertyList` only when the application wants strict
+    /// integrity checking for the current Foundation representation.
+    public func downloadValidated(
+        _ request: URLRequest,
+        resumeData: Data? = nil,
+        jobID: UUID? = nil,
+        mode: BackgroundTransferResumeDataValidationMode = .bounded
+    ) throws -> URLSessionDownloadTask {
+        let validated = try BackgroundTransferResumeDataValidator().validate(
+            resumeData,
+            mode: mode
+        )
+        return download(
+            request,
+            resumeData: validated,
+            jobID: jobID
+        )
+    }
+
     /// Returns the tasks currently owned by the background session.
     ///
     /// Call this after relaunch before restoring jobs. The descriptor reads
