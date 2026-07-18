@@ -3,6 +3,8 @@
 This documentation is the durable guide for adopting, extending, and
 reviewing the SDK. The root [README](../README.md) is the concise API tour;
 these pages explain decisions, lifecycle contracts, and operational tradeoffs.
+Release history and the 2.0.0 gate are tracked in the root
+[CHANGELOG](../CHANGELOG.md).
 
 ## Start here
 

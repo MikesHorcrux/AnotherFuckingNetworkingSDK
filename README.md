@@ -3,7 +3,8 @@
 A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, replay-safe opt-in retries, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
 
 For detailed adoption, architecture, lifecycle, security, and release guidance,
-see the [documentation hub](docs/README.md). Repository-specific agent
+see the [documentation hub](docs/README.md). Release history and the 2.0.0 gate
+are tracked in [CHANGELOG.md](CHANGELOG.md). Repository-specific agent
 implementation rules live in [skills/afn-networking-sdk](skills/afn-networking-sdk/SKILL.md).
 
 ## Requirements

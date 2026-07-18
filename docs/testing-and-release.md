@@ -85,5 +85,6 @@ Each PR should be small enough to review independently and include:
 2. Run strict Debug and Release tests.
 3. Run library-evolution and forward-concurrency builds.
 4. Review public API diffs and deprecations.
-5. Update changelog, migration notes, and security guidance.
+5. Update [CHANGELOG.md](../CHANGELOG.md), migration notes, and security
+   guidance.
 6. Tag a semantic version only after all required PR checks are green.
