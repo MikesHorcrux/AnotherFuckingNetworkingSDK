@@ -280,6 +280,14 @@ The default moves Foundation's ephemeral download into a unique SDK-owned tempor
 
 Successful downloads are never loaded into memory. HTTP failure bodies are included in `NetworkError.requestFailed` only when they are at most 1 MiB; larger download error files produce `data == nil`.
 
+Filesystem validation, bounded error reads, directory creation, moves, and
+replacements run on a dedicated utility queue rather than occupying Swift's
+cooperative executor. Cancellation observed before queued work begins prevents
+the filesystem call. Once an individual move or replacement has started, the
+system call is allowed to reach a consistent result; cancellation is reported
+at the next completion boundary, so callers should still treat destination
+ownership and cleanup as their responsibility.
+
 These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
 
 ## WebSockets

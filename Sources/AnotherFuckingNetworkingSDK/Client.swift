@@ -103,6 +103,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
     private let activityMonitor: NetworkActivityMonitor?
+    private let fileIOExecutor: FileIOExecutor
     private let webSocketTransportFactory: WebSocketTransportFactory
 
     public convenience init(
@@ -140,6 +141,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
+        fileIOExecutor: FileIOExecutor = .shared,
         webSocketTransportFactory: @escaping WebSocketTransportFactory
     ) {
         state = CriticalState(
@@ -153,6 +155,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         self.urlSession = urlSession
         self.logger = logger
         self.activityMonitor = activityMonitor
+        self.fileIOExecutor = fileIOExecutor
         self.webSocketTransportFactory = webSocketTransportFactory
     }
 
@@ -300,7 +303,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         case .data(let data):
             bodySource = .provided(data)
         case .file(let fileURL):
-            try Self.validateUploadSource(fileURL)
+            try await fileIOExecutor.run {
+                try Self.validateUploadSource(fileURL)
+            }
             bodySource = .provided(nil)
         }
 
@@ -348,7 +353,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
-        try Self.validateDownloadDestination(destination)
+        try await fileIOExecutor.run {
+            try Self.validateDownloadDestination(destination)
+        }
         let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
@@ -374,7 +381,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            let errorData = Self.readDownloadErrorData(at: temporaryURL)
+            let errorData = try await fileIOExecutor.run {
+                Self.readDownloadErrorData(at: temporaryURL)
+            }
             logger?.log(response: response, data: errorData ?? Data())
             try Task.checkCancellation()
             throw NetworkError.requestFailed(
@@ -387,10 +396,13 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         try Task.checkCancellation()
         let storedURL: URL
         do {
-            storedURL = try Self.storeDownloadedFile(
-                at: temporaryURL,
-                destination: destination
-            )
+            storedURL = try await fileIOExecutor.run {
+                try Self.storeDownloadedFile(
+                    at: temporaryURL,
+                    destination: destination
+                )
+            }
+            try Task.checkCancellation()
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as NetworkError {
