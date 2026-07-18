@@ -26,6 +26,7 @@ Release history and the 2.0.0 gate are tracked in the root
 | Add bounded response caching | [Response caching](response-caching.md) |
 | Suppress repeated endpoint failures | [Circuit breaker](circuit-breaker.md) |
 | Validate physical devices and relaunch | [Device validation](device-validation.md) |
+| Review the latest local device evidence | [Device validation report](device-validation-report.md) |
 | Review secrets, TLS, redaction, and pinning | [Security](security.md) |
 | Test, benchmark, release, and review changes | [Testing and release](testing-and-release.md) |
 | Track planned capability modules | [Roadmap](roadmap.md) |
