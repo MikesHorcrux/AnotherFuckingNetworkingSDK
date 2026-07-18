@@ -1,0 +1,460 @@
+import Foundation
+import Testing
+import AnotherFuckingNetworkingSDK
+import AnotherFuckingNetworkingSDKTesting
+
+@Suite("Mock transfer support")
+struct MockTransferTests {
+    @Test("Transfer mocks inject through the protocol and exact stubs win")
+    func existentialInjectionAndPrecedence() async throws {
+        let mock = MockAPIClient()
+        let client: any APIClientTransferProtocol = mock
+        let exactUpload = MockTransferUploadRequest(id: 1)
+        let exactBody = UploadBody.data(Data("exact".utf8))
+
+        await mock.stubUpload(
+            MockTransferUploadRequest.self,
+            with: uploadResponse(id: 0)
+        )
+        try await mock.stubUploadError(
+            exactUpload,
+            from: exactBody,
+            error: MockTransferFixtureError.exactUpload
+        )
+
+        let fallback = try await client.upload(
+            MockTransferUploadRequest(id: 2),
+            from: .data(Data("fallback".utf8))
+        )
+        #expect(fallback.value.id == 0)
+
+        do {
+            _ = try await client.upload(exactUpload, from: exactBody)
+            Issue.record("Expected the exact upload failure")
+        } catch let error as MockTransferFixtureError {
+            #expect(error == .exactUpload)
+        }
+
+        try await mock.stubUpload(
+            exactUpload,
+            from: exactBody,
+            with: uploadResponse(id: 1)
+        )
+        #expect(try await client.upload(exactUpload, from: exactBody).value.id == 1)
+
+        let exactDownload = MockTransferDownloadRequest(id: 7)
+        let destination = DownloadDestination.file(
+            mockFileURL("exact-download"),
+            overwriteExisting: false
+        )
+        await mock.stubDownloadError(
+            MockTransferDownloadRequest.self,
+            error: MockTransferFixtureError.typeDownload
+        )
+        try await mock.stubDownload(
+            exactDownload,
+            to: destination,
+            with: downloadResponse("exact-response")
+        )
+
+        #expect(try await client.download(
+            exactDownload,
+            to: destination
+        ).fileURL == mockFileURL("exact-response"))
+
+        do {
+            _ = try await client.download(exactDownload, to: .temporary)
+            Issue.record("Expected the type-wide download failure")
+        } catch let error as MockTransferFixtureError {
+            #expect(error == .typeDownload)
+        }
+    }
+
+    @Test("Data and file uploads mirror body construction without file I/O")
+    func uploadBodyConstruction() async throws {
+        let mock = MockAPIClient(globalHeaders: ["X-Global": "global"])
+        let dataRequest = MockTransferUploadRequest(id: 10)
+        let fileRequest = MockTransferUploadRequest(id: 11)
+        let data = Data([0x00, 0x01, 0x02])
+        let missingFile = mockFileURL("never-created-upload")
+
+        try await mock.stubUpload(
+            dataRequest,
+            from: .data(data),
+            with: uploadResponse(id: 10)
+        )
+        try await mock.stubUpload(
+            fileRequest,
+            from: .file(missingFile),
+            with: uploadResponse(id: 11)
+        )
+
+        _ = try await mock.upload(dataRequest, from: .data(data))
+        _ = try await mock.upload(fileRequest, from: .file(missingFile))
+
+        let records = await mock.recordedTransfers
+        #expect(records.count == 2)
+        #expect(records[0].operation == .upload(.data(data)))
+        #expect(records[0].requestBody == data)
+        #expect(records[0].headers["x-visible-body"] == "3")
+        #expect(records[0].headers["x-global"] == "global")
+        #expect(records[1].operation == .upload(.file(missingFile)))
+        #expect(records[1].requestBody == nil)
+        #expect(records[1].headers["x-visible-body"] == "file-backed")
+    }
+
+    @Test("Exact transfer arguments distinguish sources and destinations")
+    func exactArgumentMatchingAndFileURLValidation() async throws {
+        let mock = MockAPIClient()
+        let uploadRequest = MockTransferUploadRequest(id: 12)
+        let firstFile = mockFileURL("first-source")
+        let secondFile = mockFileURL("second-source")
+        try await mock.stubUpload(
+            uploadRequest,
+            from: .file(firstFile),
+            with: uploadResponse(id: 1)
+        )
+        try await mock.stubUpload(
+            uploadRequest,
+            from: .file(secondFile),
+            with: uploadResponse(id: 2)
+        )
+
+        #expect(try await mock.upload(
+            uploadRequest,
+            from: .file(firstFile)
+        ).value.id == 1)
+        #expect(try await mock.upload(
+            uploadRequest,
+            from: .file(secondFile)
+        ).value.id == 2)
+
+        let downloadRequest = MockTransferDownloadRequest(id: 12)
+        let destination = mockFileURL("destination")
+        try await mock.stubDownload(
+            downloadRequest,
+            to: .temporary,
+            with: downloadResponse("temporary")
+        )
+        try await mock.stubDownload(
+            downloadRequest,
+            to: .file(destination, overwriteExisting: false),
+            with: downloadResponse("preserve")
+        )
+        try await mock.stubDownload(
+            downloadRequest,
+            to: .file(destination, overwriteExisting: true),
+            with: downloadResponse("overwrite")
+        )
+
+        #expect(try await mock.download(
+            downloadRequest,
+            to: .temporary
+        ).fileURL == mockFileURL("temporary"))
+        #expect(try await mock.download(
+            downloadRequest,
+            to: .file(destination, overwriteExisting: false)
+        ).fileURL == mockFileURL("preserve"))
+        #expect(try await mock.download(
+            downloadRequest,
+            to: .file(destination, overwriteExisting: true)
+        ).fileURL == mockFileURL("overwrite"))
+
+        let recordCount = await mock.recordedTransfers.count
+        let remoteURL = try #require(URL(string: "https://example.com/file"))
+        await expectFileTransferError(.sourceIsNotFileURL(remoteURL)) {
+            _ = try await mock.upload(uploadRequest, from: .file(remoteURL))
+        }
+        await expectFileTransferError(.destinationIsNotFileURL(remoteURL)) {
+            _ = try await mock.download(
+                downloadRequest,
+                to: .file(remoteURL, overwriteExisting: false)
+            )
+        }
+        #expect(await mock.recordedTransfers.count == recordCount)
+    }
+
+    @Test("Download factories create independent responses and see records")
+    func downloadFactories() async throws {
+        let factoryRecords = LockedBox<[RecordedTransfer]>([])
+        let mock = MockAPIClient()
+        await mock.stubDownload(MockTransferDownloadRequest.self) { record in
+            let index = factoryRecords.withLock { records in
+                records.append(record)
+                return records.count
+            }
+            return DownloadResponse(
+                fileURL: mockFileURL("factory-\(index)"),
+                metadata: HTTPResponseMetadata(
+                    statusCode: 200 + index,
+                    url: record.url
+                )
+            )
+        }
+
+        let first = try await mock.download(MockTransferDownloadRequest(id: 1))
+        let second = try await mock.download(MockTransferDownloadRequest(id: 2))
+
+        #expect(first.fileURL == mockFileURL("factory-1"))
+        #expect(second.fileURL == mockFileURL("factory-2"))
+        #expect(first.statusCode == 201)
+        #expect(second.statusCode == 202)
+        #expect(factoryRecords.withLock { $0.map(\.sequenceID) } == [0, 1])
+        let records = await mock.recordedTransfers
+        #expect(records.map(\.requestBody) == [
+            Data("request-1".utf8),
+            Data("request-2".utf8)
+        ])
+        #expect(records.map { $0.headers["x-transfer"] } == [
+            "download", "download"
+        ])
+        #expect(records.map { $0.queryItems.first?.value } == ["1", "2"])
+    }
+
+    @Test("Missing stubs include records and reset clears transfer state")
+    func missingStubsAndReset() async throws {
+        let mock = MockAPIClient()
+        let uploadRequest = MockTransferUploadRequest(id: 20)
+        let body = UploadBody.data(Data("missing".utf8))
+
+        do {
+            _ = try await mock.upload(uploadRequest, from: body)
+            Issue.record("Expected a missing upload stub")
+        } catch let error as MockTransferError {
+            guard case .missingStub(let record) = error else {
+                Issue.record("Expected missingStub, got \(error)")
+                return
+            }
+            #expect(record.sequenceID == 0)
+            #expect(record.operation == .upload(body))
+            #expect(record.path == uploadRequest.path)
+        }
+
+        do {
+            _ = try await mock.download(MockTransferDownloadRequest(id: 21))
+            Issue.record("Expected a missing download stub")
+        } catch let error as MockTransferError {
+            guard case .missingStub(let record) = error else {
+                Issue.record("Expected missingStub, got \(error)")
+                return
+            }
+            #expect(record.sequenceID == 1)
+            #expect(record.operation == .download(.temporary))
+        }
+
+        await mock.stubUpload(
+            MockTransferUploadRequest.self,
+            with: uploadResponse(id: 99)
+        )
+        await mock.clearRecordedTransfers()
+        #expect(await mock.recordedTransfers.isEmpty)
+        #expect(try await mock.upload(
+            uploadRequest,
+            from: body
+        ).value.id == 99)
+
+        await mock.setDelay(30)
+        await mock.reset()
+
+        #expect(await mock.recordedTransfers.isEmpty)
+        do {
+            _ = try await mock.upload(uploadRequest, from: body)
+            Issue.record("Expected reset to clear transfer stubs")
+        } catch let error as MockTransferError {
+            guard case .missingStub = error else {
+                Issue.record("Expected missingStub after reset, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test("Transfer delay cancellation is deterministic")
+    func cancellation() async throws {
+        let preCancelled = MockAPIClient()
+        await preCancelled.stubUpload(
+            MockTransferUploadRequest.self,
+            with: uploadResponse(id: 29)
+        )
+        let preCancelledTask = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await preCancelled.upload(
+                MockTransferUploadRequest(id: 29),
+                from: .data(Data())
+            )
+        }
+        do {
+            _ = try await preCancelledTask.value
+            Issue.record("Expected pre-cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(await preCancelled.recordedTransfers.isEmpty)
+
+        let started = AsyncSignal()
+        let observedNanoseconds = LockedBox<UInt64?>(nil)
+        let mock = MockAPIClient(
+            delay: 2,
+            sleeper: { nanoseconds in
+                observedNanoseconds.withLock { $0 = nanoseconds }
+                await started.signal()
+                await AsyncSignal().wait()
+                try Task.checkCancellation()
+            }
+        )
+        await mock.stubUpload(
+            MockTransferUploadRequest.self,
+            with: uploadResponse(id: 30)
+        )
+
+        let task = Task {
+            try await mock.upload(
+                MockTransferUploadRequest(id: 30),
+                from: .data(Data("payload".utf8))
+            )
+        }
+        await started.wait()
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected transfer cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        #expect(observedNanoseconds.withLock { $0 } == 2_000_000_000)
+        #expect(await mock.recordedTransfers.count == 1)
+    }
+
+    @Test("Concurrent transfers receive contiguous unique sequence IDs")
+    func concurrentSequenceIDs() async throws {
+        let mock = MockAPIClient()
+        await mock.stubUpload(
+            MockTransferUploadRequest.self,
+            with: uploadResponse(id: 40)
+        )
+        await mock.stubDownload(
+            MockTransferDownloadRequest.self,
+            with: downloadResponse("concurrent")
+        )
+        let client: any APIClientTransferProtocol = mock
+        let operationCount = 40
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<operationCount {
+                group.addTask {
+                    if index.isMultiple(of: 2) {
+                        _ = try await client.upload(
+                            MockTransferUploadRequest(id: index),
+                            from: .data(Data([UInt8(index)]))
+                        )
+                    } else {
+                        _ = try await client.download(
+                            MockTransferDownloadRequest(id: index)
+                        )
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        let records = await mock.recordedTransfers
+        #expect(records.map(\.sequenceID) == Array(0..<operationCount))
+        #expect(Set(records.map(\.sequenceID)).count == operationCount)
+        #expect(records.filter {
+            if case .upload = $0.operation { return true }
+            return false
+        }.count == operationCount / 2)
+        #expect(records.filter {
+            if case .download = $0.operation { return true }
+            return false
+        }.count == operationCount / 2)
+    }
+}
+
+private struct MockTransferValue: Codable, Equatable, Sendable {
+    let id: Int
+}
+
+private enum MockTransferFixtureError: Error, Equatable, Sendable {
+    case exactUpload
+    case typeDownload
+    case bodyEncodingMustBeBypassed
+}
+
+private struct MockTransferUploadRequest: Request {
+    typealias ReturnType = MockTransferValue
+
+    let id: Int
+    var path: String { "uploads/\(id)" }
+    let method = HTTPMethod.post
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "id", value: String(id))]
+    }
+    var headers: [String: String]? {
+        ["X-Request": String(id)]
+    }
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        throw MockTransferFixtureError.bodyEncodingMustBeBypassed
+    }
+
+    func customize(_ request: inout URLRequest) throws {
+        let visibleBody = request.httpBody.map { String($0.count) }
+            ?? "file-backed"
+        request.setValue(visibleBody, forHTTPHeaderField: "X-Visible-Body")
+    }
+}
+
+private struct MockTransferDownloadRequest: DownloadRequest {
+    let id: Int
+    var path: String { "downloads/\(id)" }
+    let method = HTTPMethod.post
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "id", value: String(id))]
+    }
+    var body: Data? { Data("request-\(id)".utf8) }
+
+    func customize(_ request: inout URLRequest) throws {
+        request.setValue("download", forHTTPHeaderField: "X-Transfer")
+    }
+}
+
+private func uploadResponse(
+    id: Int
+) -> HTTPResponse<MockTransferValue> {
+    HTTPResponse(
+        value: MockTransferValue(id: id),
+        metadata: HTTPResponseMetadata(statusCode: 200 + id)
+    )
+}
+
+private func downloadResponse(_ name: String) -> DownloadResponse {
+    DownloadResponse(
+        fileURL: mockFileURL(name),
+        metadata: HTTPResponseMetadata(statusCode: 200)
+    )
+}
+
+private func mockFileURL(_ name: String) -> URL {
+    URL(fileURLWithPath: "/mock-transfer-fixtures/\(name)")
+}
+
+private func expectFileTransferError(
+    _ expected: FileTransferError,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        Issue.record("Expected file transfer error")
+    } catch let error as NetworkError {
+        guard case .fileOperationFailed(let underlying) = error,
+              let transferError = underlying as? FileTransferError else {
+            Issue.record("Expected fileOperationFailed, got \(error)")
+            return
+        }
+        #expect(transferError == expected)
+    } catch {
+        Issue.record("Expected NetworkError, got \(error)")
+    }
+}
