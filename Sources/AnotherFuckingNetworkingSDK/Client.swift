@@ -172,6 +172,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             baseURL: configuration.baseURL,
             globalHeaders: configuration.globalHeaders
         )
+        try Task.checkCancellation()
         guard let url = urlRequest.url else {
             throw WebSocketError.invalidURL
         }
@@ -317,12 +318,14 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         try Task.checkCancellation()
         guard let httpResponse = response as? HTTPURLResponse else {
             logger?.log(response: response, data: Data())
+            try Task.checkCancellation()
             throw NetworkError.invalidResponse
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
             let errorData = Self.readDownloadErrorData(at: temporaryURL)
             logger?.log(response: response, data: errorData ?? Data())
+            try Task.checkCancellation()
             throw NetworkError.requestFailed(
                 statusCode: httpResponse.statusCode,
                 data: errorData
@@ -330,6 +333,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         }
 
         logger?.log(response: response, data: Data())
+        try Task.checkCancellation()
         let storedURL: URL
         do {
             storedURL = try Self.storeDownloadedFile(
@@ -378,6 +382,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
 
         switch bodySource {
         case .encoded:
+            try Task.checkCancellation()
             do {
                 urlRequest.httpBody = try request.makeBody(
                     using: configuration.encoderFactory()
@@ -387,6 +392,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             } catch {
                 throw NetworkError.encodingFailed(error)
             }
+            try Task.checkCancellation()
         case .provided(let data):
             urlRequest.httpBody = data
         }
@@ -398,6 +404,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         } catch {
             throw NetworkError.requestConfigurationFailed(error)
         }
+        try Task.checkCancellation()
 
         return urlRequest
     }
@@ -419,6 +426,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
 
         try Task.checkCancellation()
         logger?.log(response: response, data: data)
+        try Task.checkCancellation()
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NetworkError.invalidResponse
@@ -439,6 +447,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         response: HTTPURLResponse,
         configuration: Configuration
     ) throws -> HTTPResponse<R.ReturnType> {
+        try Task.checkCancellation()
         let value: R.ReturnType
         do {
             value = try decode(
@@ -454,6 +463,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         } catch {
             throw NetworkError.decodingFailed(error)
         }
+        try Task.checkCancellation()
 
         return HTTPResponse(
             value: value,
@@ -465,7 +475,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     private static func throwTransportError(
         _ error: any Error
     ) throws -> Never {
-        if error is CancellationError {
+        if Task.isCancelled || error is CancellationError {
             throw CancellationError()
         }
         if let urlError = error as? URLError {
