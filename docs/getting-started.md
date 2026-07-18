@@ -131,6 +131,20 @@ Use `MockAPIClient` or a URL protocol fixture in tests. Keep retries and auth
 as policy behavior in the client boundary rather than duplicating them in
 every service.
 
+## Observe connectivity without blocking requests
+
+NetworkPathMonitor is optional and newest-only. It exposes privacy-safe
+status, interface, cost, and constraint snapshots for UI, telemetry, or policy
+selection; it never gates a request or replaces URLSession's
+waitsForConnectivity behavior:
+
+    let pathMonitor = NetworkPathMonitor()
+    pathMonitor.start()
+
+    for await snapshot in pathMonitor.snapshots {
+        print(snapshot.status, snapshot.isExpensive)
+    }
+
 ## Handle cancellation
 
 `CancellationError` is preserved. Do not catch it as a generic transport

@@ -56,6 +56,9 @@ source and tests before relying on any example below.
   `WebSocketReliabilityClient` reconnect/heartbeat policies.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
+- Connectivity: `NetworkPathMonitor` provides newest-only path snapshots for
+  UI or policy selection; never add a reachability preflight that blocks a
+  request.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
   `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters
   lightweight and vendor-neutral. Transfer delegates emit separate
