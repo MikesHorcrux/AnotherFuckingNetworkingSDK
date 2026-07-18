@@ -49,7 +49,8 @@ source and tests before relying on any example below.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
-  buffering, lifecycle state, and Observation adapters.
+  buffering, lifecycle state, Observation adapters, and opt-in
+  `WebSocketReliabilityClient` reconnect/heartbeat policies.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
@@ -97,7 +98,8 @@ pretend a foreground convenience task is durable.
 
 Keep one receive owner. Preserve FIFO order with a bounded buffer and fail
 closed on overflow. Do not add automatic reconnect or heartbeat behavior to
-the base connection; expose those as policy wrappers. See
+the base connection; use `WebSocketReliabilityClient` when bounded retry and
+session restoration are explicitly desired. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
 
 ### Tests and release gates

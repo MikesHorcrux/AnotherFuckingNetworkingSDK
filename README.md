@@ -597,6 +597,28 @@ Cancelling an in-flight iteration closes the connection.
 
 The SDK deliberately does not reconnect automatically or choose a heartbeat schedule. Reconnect backoff, session restoration, and ping intervals/timeouts are application policy; call `ping()` directly or build that policy around `WebSocketClientProtocol`.
 
+For a bounded, opt-in policy, wrap the client in `WebSocketReliabilityClient`:
+
+```swift
+let reliableClient = WebSocketReliabilityClient(
+    client: client,
+    policy: .init(
+        maximumReconnectAttempts: 5,
+        heartbeatIntervalNanoseconds: 15_000_000_000
+    ),
+    restorer: { connection in
+        try await connection.send(text: "subscribe:lobby")
+    }
+)
+
+let connection = try await reliableClient.connect(ChatSocket(roomID: "lobby"))
+```
+
+Reconnects are attempted only for transport/close/handshake failures, use
+bounded exponential backoff with jitter, and never replay a message that
+Foundation already accepted. See [WebSocket reliability](docs/websocket-reliability.md)
+for lifecycle, testing, and session-restoration guidance.
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:
