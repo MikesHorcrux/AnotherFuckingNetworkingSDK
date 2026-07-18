@@ -36,7 +36,8 @@ let client = APIClient(
 ```
 
 Request, upload, download, stream, and WebSocket handshake events share the
-same operation-ID sequence for one client. Retry attempts have separate
+same operation-ID sequence for one client. WebSocket task metrics are emitted
+after the upgrade when Foundation provides them. Retry attempts have separate
 `attemptStarted`, `attemptCompleted`, or `attemptFailed` events. Stream
 operation completion is leased until EOF, cancellation, failure, or stream
 deallocation rather than ending when the headers arrive.
@@ -50,9 +51,10 @@ outside the SDK target so applications choose their exporter and sampling
 policy.
 
 `NetworkTaskMetricsSnapshot` is the stable event field for platform task
-metrics. Transfer delegates emit a separate `taskMetrics` event whenever
-Foundation calls `didFinishCollecting`, even when progress callbacks are not
-installed. It is optional because Foundation does not expose identical metrics
+metrics. Transfer delegates and Foundation WebSocket transports emit a
+separate `taskMetrics` event whenever Foundation calls `didFinishCollecting`,
+even when progress callbacks are not installed. It is optional because
+Foundation does not expose identical metrics
 for every async URLSession API and supported OS release. The adapter retains
 timing values only and never retains URL, host, headers, or payload data.
 

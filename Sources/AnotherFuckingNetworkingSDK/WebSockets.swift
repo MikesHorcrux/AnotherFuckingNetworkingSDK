@@ -603,6 +603,7 @@ enum WebSocketTaskEvent: Sendable {
     case opened(negotiatedSubprotocol: String?)
     case closed(WebSocketClose)
     case completed((any Error)?)
+    case metrics(NetworkTaskMetricsSnapshot)
 }
 
 protocol WebSocketTaskAdapter: Sendable {
@@ -804,12 +805,31 @@ private final class FoundationWebSocketLifecycleDelegate: NSObject,
         )
     }
 
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        emit(.metrics(NetworkTaskMetricsSnapshot(metrics)))
+        (session.delegate as? URLSessionTaskDelegate)?.urlSession?(
+            session,
+            task: task,
+            didFinishCollecting: metrics
+        )
+    }
+
     private func emit(_ event: WebSocketTaskEvent) {
         handler.withCriticalRegion { $0 }?(event)
     }
 }
 
 // MARK: - Internal transport
+
+protocol WebSocketTaskMetricsReporting: AnyObject, Sendable {
+    func setTaskMetricsHandler(
+        _ handler: @escaping @Sendable (NetworkTaskMetricsSnapshot) -> Void
+    )
+}
 
 enum WebSocketTransportStatus: Sendable {
     case open
@@ -855,6 +875,7 @@ private extension WebSocketMessage {
 }
 
 final class URLSessionWebSocketTransport: WebSocketTransport,
+    WebSocketTaskMetricsReporting,
     @unchecked Sendable {
     private struct BufferedMessage: Sendable {
         let message: WebSocketMessage
@@ -933,6 +954,9 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
     }
 
     private let adapter: any WebSocketTaskAdapter
+    private let taskMetricsHandler = CriticalState<(
+        @Sendable (NetworkTaskMetricsSnapshot) -> Void
+    )?>(nil)
     private let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
     private let lifecycle = CriticalState(LifecycleState())
     private let openContinuation = OneShotContinuation<String?>()
@@ -967,6 +991,12 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
         adapter.setEventHandler { [weak self] event in
             self?.handle(event)
         }
+    }
+
+    func setTaskMetricsHandler(
+        _ handler: @escaping @Sendable (NetworkTaskMetricsSnapshot) -> Void
+    ) {
+        taskMetricsHandler.withCriticalRegion { $0 = handler }
     }
 
     deinit {
@@ -1279,6 +1309,9 @@ final class URLSessionWebSocketTransport: WebSocketTransport,
             }
             stateBroadcaster.finish(with: .closed(completion.close))
             completion.waiter?.resolve(.failure(completion.receiveError))
+
+        case .metrics(let snapshot):
+            taskMetricsHandler.withCriticalRegion { $0 }?(snapshot)
         }
     }
 
