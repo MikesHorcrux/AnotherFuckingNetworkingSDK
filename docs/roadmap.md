@@ -13,14 +13,17 @@ roadmap item is not a shipped feature.
 - Authenticated wrapper with single-flight token loading and safe 401 replay.
 - Memory/file uploads, durable foreground downloads, multipart validation.
 - Opt-in upload/download progress events with bounded byte counts and phases.
+- Durable `TransferJob` records, JSON persistence, and cancellation-safe
+  orchestration seams for app-owned background sessions.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 
 ## Next production modules
 
-1. **Background/resumable transfers** — separate product with persistent
-   identity, delegate rebinding, resume data, and relaunch completion handling.
+1. **Platform background/resumable adapters** — background URLSession delegate
+   rebinding, system completion handlers, resume-data validation, and relaunch
+   integration on each supported Apple platform.
 2. **Telemetry** — operation/attempt IDs, duration, bytes, task metrics, and an
    optional OpenTelemetry bridge.
 3. **Streaming multipart** — file-backed parts and bounded encoding.

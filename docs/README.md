@@ -13,6 +13,7 @@ these pages explain decisions, lifecycle contracts, and operational tradeoffs.
 | Reason about Swift concurrency and cancellation | [Concurrency and lifecycle](concurrency-and-lifecycle.md) |
 | Add bearer auth, refresh, and retries safely | [Authentication and retries](authentication-and-retries.md) |
 | Build WebSockets and file transfers | [WebSockets and transfers](websockets-and-transfers.md) |
+| Persist and resume transfer jobs | [Background and resumable transfers](background-transfers.md) |
 | Review secrets, TLS, redaction, and pinning | [Security](security.md) |
 | Test, benchmark, release, and review changes | [Testing and release](testing-and-release.md) |
 | Track planned capability modules | [Roadmap](roadmap.md) |

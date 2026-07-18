@@ -474,9 +474,25 @@ attempt number, completed bytes, and an optional known total. The callback must
 remain lightweight because URLSession invokes it on its delegate context. The
 default transfer APIs do no progress work.
 
-These APIs model foreground async transfers. Resumable downloads and
-relaunch-safe background sessions require application lifecycle policy and are
-intentionally separate concerns.
+For queue state that must survive relaunch, persist `TransferJob` records with
+`JSONTransferJobStore` and coordinate execution through
+`TransferJobCoordinator`. The coordinator records queued, running, paused,
+failed, and committed states without creating a second URLSession stack:
+
+```swift
+let coordinator = TransferJobCoordinator(
+    store: JSONTransferJobStore(fileURL: jobsURL)
+)
+try await coordinator.restore()
+try await coordinator.enqueue(
+    TransferJob(kind: .download, requestKey: "export-42")
+)
+```
+
+The operation closure resolves `requestKey` and bridges to an app-owned
+background URLSession adapter. It can persist bounded resume data at each
+checkpoint. System background delegate rebinding and completion handlers remain
+platform-specific; see [Background and resumable transfers](docs/background-transfers.md).
 
 ## WebSockets
 

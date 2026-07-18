@@ -43,6 +43,9 @@ source and tests before relying on any example below.
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
   `DownloadDestination`, durable file ownership.
+- Background transfer state: `TransferJob`, `TransferJobStore`, and
+  `TransferJobCoordinator`; keep URLSession background delegates and request
+  resolution in the application-owned adapter.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
