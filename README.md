@@ -183,6 +183,10 @@ print(response.value(forHTTPHeaderField: "ETag") ?? "no tag")
 print(response.data.count)
 ```
 
+Rejected HTTP statuses throw `NetworkError.requestFailed(HTTPFailure)`. The
+failure exposes the same status, normalized headers, and final response URL,
+plus the retained response bytes when they are available within safety limits.
+
 Response header names are stored lowercase and looked up case-insensitively. The ordinary `send(_:)` API remains the concise choice when only the decoded value is needed. Metadata-aware services can depend on `any APIClientResponseProtocol`; ordinary services can continue using `any APIClientProtocol`.
 
 For binary or otherwise undecoded bodies, conform to `RawDataRequest`:
@@ -278,7 +282,10 @@ print(download.statusCode)
 
 The default moves Foundation's ephemeral download into a unique SDK-owned temporary location before returning; the caller owns that file and removes it when finished. To choose the final location, pass `.file(destinationURL, overwriteExisting: false)`. Existing files are preserved unless overwrite is explicitly `true`, and file-location failures are reported as `NetworkError.fileOperationFailed` with a `FileTransferError` when the problem is caller-correctable.
 
-Successful downloads are never loaded into memory. HTTP failure bodies are included in `NetworkError.requestFailed` only when they are at most 1 MiB; larger download error files produce `data == nil`.
+Successful downloads are never loaded into memory. `NetworkError.requestFailed`
+retains an `HTTPFailure` containing the status, final URL, normalized headers,
+and bounded body data. Failed download bodies are included only when they are at
+most 1 MiB; larger error files produce `failure.data == nil`.
 
 Filesystem validation, bounded error reads, directory creation, moves, and
 replacements run on a dedicated utility queue rather than occupying Swift's
@@ -468,8 +475,10 @@ do {
         print("Could not configure the request: \(underlying)")
     case .transport(let urlError):
         print("Transport failed with \(urlError.code)")
-    case .requestFailed(let statusCode, let data):
-        print("HTTP \(statusCode), body bytes: \(data?.count ?? 0)")
+    case .requestFailed(let failure):
+        print("HTTP \(failure.statusCode), body bytes: \(failure.data?.count ?? 0)")
+        let requestID = failure.value(forHTTPHeaderField: "X-Request-ID")
+        print("Request ID: \(requestID ?? "unknown")")
     case .emptyResponse(let statusCode):
         print("HTTP \(statusCode) did not contain the expected body")
     case .decodingFailed(let underlying):
@@ -482,7 +491,9 @@ do {
 }
 ```
 
-HTTP error bodies are preserved as `Data?` for endpoint-specific decoding. Standard URL failures remain inspectable as `URLError` inside `.transport`.
+`HTTPFailure` preserves response status, final URL, normalized headers, and
+optional response `Data` for endpoint-specific decoding or retry decisions.
+Standard URL failures remain inspectable as `URLError` inside `.transport`.
 
 ## Activity streams and Observation
 
@@ -652,7 +663,7 @@ await mock.stubResponse(
 
 Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
 
-Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
+Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
 Transfer services can inject the same mock through `APIClientTransferProtocol`:
 
@@ -753,6 +764,10 @@ Version 2 is a deliberate major-version modernization:
 - Handle `.transport`, `.encodingFailed`, `.invalidResponse`, and `.emptyResponse` in `NetworkError` switches.
 - Handle `.requestConfigurationFailed` when request customization is used.
 - Handle `.fileOperationFailed` when using file-backed transfers.
+- Replace `.requestFailed(let statusCode, let data)` patterns with
+  `.requestFailed(let failure)`, then read `failure.statusCode`, `failure.data`,
+  `failure.url`, or `failure.headers`. Construct explicit failures with
+  `.requestFailed(HTTPFailure(metadata:data:))`.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.

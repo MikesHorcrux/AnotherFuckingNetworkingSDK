@@ -70,6 +70,53 @@ struct MockTransferTests {
         }
     }
 
+    @Test("Transfer failure stubs preserve structured HTTP failures unchanged")
+    func structuredHTTPFailureStubs() async throws {
+        let mock = MockAPIClient()
+        let expected = HTTPFailure(
+            metadata: HTTPResponseMetadata(
+                statusCode: 503,
+                url: URL(string: "https://api.example.com/maintenance"),
+                headers: ["Retry-After": "120"]
+            ),
+            data: Data(#"{"message":"maintenance"}"#.utf8)
+        )
+        let error = NetworkError.requestFailed(expected)
+        await mock.stubUploadError(
+            MockTransferUploadRequest.self,
+            error: error
+        )
+        await mock.stubDownloadError(
+            MockTransferDownloadRequest.self,
+            error: error
+        )
+
+        do {
+            _ = try await mock.upload(
+                MockTransferUploadRequest(id: 1),
+                from: .data(Data("upload".utf8))
+            )
+            Issue.record("Expected the upload HTTP failure")
+        } catch let networkError as NetworkError {
+            guard case .requestFailed(let failure) = networkError else {
+                Issue.record("Expected requestFailed, got \(networkError)")
+                return
+            }
+            #expect(failure == expected)
+        }
+
+        do {
+            _ = try await mock.download(MockTransferDownloadRequest(id: 1))
+            Issue.record("Expected the download HTTP failure")
+        } catch let networkError as NetworkError {
+            guard case .requestFailed(let failure) = networkError else {
+                Issue.record("Expected requestFailed, got \(networkError)")
+                return
+            }
+            #expect(failure == expected)
+        }
+    }
+
     @Test("Data and file uploads mirror body construction without file I/O")
     func uploadBodyConstruction() async throws {
         let mock = MockAPIClient(globalHeaders: ["X-Global": "global"])

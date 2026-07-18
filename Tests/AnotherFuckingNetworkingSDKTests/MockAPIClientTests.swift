@@ -53,6 +53,34 @@ struct MockAPIClientTests {
         #expect(response.data.isEmpty)
     }
 
+    @Test("Failure stubs preserve structured HTTP failures unchanged")
+    func structuredHTTPFailureStub() async throws {
+        let mock = MockAPIClient()
+        let expected = HTTPFailure(
+            metadata: HTTPResponseMetadata(
+                statusCode: 429,
+                url: URL(string: "https://api.example.com/users/42"),
+                headers: ["Retry-After": "15"]
+            ),
+            data: Data(#"{"message":"slow down"}"#.utf8)
+        )
+        await mock.stubError(
+            GetUserRequest.self,
+            error: NetworkError.requestFailed(expected)
+        )
+
+        do {
+            _ = try await mock.send(GetUserRequest(id: 42))
+            Issue.record("Expected the structured HTTP failure")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure == expected)
+        }
+    }
+
     @Test("Exact success overrides a type-wide error")
     func exactSuccessPrecedence() async throws {
         let mock = MockAPIClient()
