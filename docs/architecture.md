@@ -96,6 +96,9 @@ Policies are values or wrappers, not hidden global switches:
   mismatches before any callback is applied. It also reports non-terminal
   durable jobs with no valid task so recovery can re-enqueue them explicitly.
 - WebSocket buffering and lifecycle policies are captured at connection open.
+- WebSocketRecoveryAdapter composes an application-owned cursor/session
+  protocol with bounded actor-isolated in-memory or atomic JSON state without
+  making the transport core understand wire semantics.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.
 - ObservableNetworkPath is a main-actor presentation adapter over those
