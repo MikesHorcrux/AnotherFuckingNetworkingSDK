@@ -70,6 +70,15 @@ jobs:
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
+          xcodebuild -quiet \
+            -scheme AnotherFuckingNetworkingSDKTesting \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            build
       - name: iOS simulator tests (when installed)
         shell: bash
         run: |
@@ -94,15 +103,6 @@ jobs:
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             -skip-testing:AnotherFuckingNetworkingSDKTests/WebSocketLoopbackTests \
             test
-          xcodebuild -quiet \
-            -scheme AnotherFuckingNetworkingSDKTesting \
-            -destination 'generic/platform=macOS' \
-            -configuration Release \
-            CODE_SIGNING_ALLOWED=NO \
-            SWIFT_STRICT_CONCURRENCY=complete \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            build
       - name: Additional Apple platform product builds (when installed)
         shell: bash
         run: |
