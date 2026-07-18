@@ -140,7 +140,14 @@ final class StubSession: @unchecked Sendable {
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
-        downloadOperation: DownloadOperation? = nil
+        downloadOperation: DownloadOperation? = nil,
+        retrySleeper: @escaping RetrySleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        retryNow: @escaping RetryNowProvider = { Date() },
+        retryRandom: @escaping RetryRandomProvider = {
+            Double.random(in: 0...1)
+        }
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
@@ -152,6 +159,9 @@ final class StubSession: @unchecked Sendable {
             activityMonitor: activityMonitor,
             fileIOExecutor: fileIOExecutor,
             downloadOperation: downloadOperation,
+            retrySleeper: retrySleeper,
+            retryNow: retryNow,
+            retryRandom: retryRandom,
             webSocketTransportFactory: {
                 session, request, configuration in
                 URLSessionWebSocketTransport(
