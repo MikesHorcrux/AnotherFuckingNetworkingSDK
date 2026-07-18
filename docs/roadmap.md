@@ -26,6 +26,8 @@ roadmap item is not a shipped feature.
   Foundation callbacks, commits temporary downloads through an explicit file
   policy, preserves idempotent terminal transitions, and pauses resumable
   completions with bounded resume data.
+- Typed post-relaunch reconciliation reports that validate task identity and
+  transfer direction before rebinding live Foundation tasks.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Known upload lengths are available to request customization before
   file-backed signing and replay, without materializing the body.
@@ -48,9 +50,10 @@ roadmap item is not a shipped feature.
 1. **Platform background/resumable integration** — device/relaunch coverage,
    resume-data validation, and coordinator routing for the shipped
    `BackgroundURLSessionAdapter` on each supported Apple platform. The SDK now
-   exposes stable task descriptors, an actor-isolated event router, and a
-   lifecycle coordinator with an explicit destination commit policy; device
-   coverage and platform terminal behavior remain.
+   exposes stable task descriptors, an actor-isolated event router, a
+   lifecycle coordinator with an explicit destination commit policy, and a
+   typed relaunch reconciliation report; device coverage and platform
+   terminal behavior remain.
 2. **Platform task-metrics integration** — oldest-target and device coverage
    remain for the shipped HTTP, transfer, and WebSocket delegate integrations.
 3. **Streaming multipart integration** — broader upload retry, signing, and

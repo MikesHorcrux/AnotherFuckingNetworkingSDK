@@ -91,6 +91,9 @@ Policies are values or wrappers, not hidden global switches:
   and durable coordinator. It starts relaunch-restored jobs, applies monotonic
   progress, and invokes an application-owned destination commit before
   terminal success.
+- Its relaunch reconciliation report validates live task descriptors against
+  restored durable jobs and separates orphaned tasks from direction
+  mismatches before any callback is applied.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.
