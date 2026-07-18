@@ -135,14 +135,16 @@ final class StubSession: @unchecked Sendable {
         baseURL: URL? = nil,
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
-        decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() }
+        decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
+        logger: NetworkingLogger? = nil
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
             urlSession: session,
             globalHeaders: globalHeaders,
             encoderFactory: encoderFactory,
-            decoderFactory: decoderFactory
+            decoderFactory: decoderFactory,
+            logger: logger
         )
     }
 }
