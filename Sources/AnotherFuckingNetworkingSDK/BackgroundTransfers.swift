@@ -388,6 +388,25 @@ public actor TransferJobCoordinator {
         try await store.save(job)
     }
 
+    /// Starts a durable job without taking ownership of an async operation.
+    ///
+    /// Background URLSession delegates receive callbacks after the original
+    /// process may have exited, so they cannot use ``execute``'s operation
+    /// closure. This transition gives those callbacks the same queued/paused
+    /// to running lifecycle while remaining idempotent for duplicate events.
+    @discardableResult
+    public func start(id: UUID) async throws -> TransferJob {
+        guard var job = jobs[id] else {
+            throw TransferJobCoordinatorError.jobUnavailable(id)
+        }
+        guard !job.state.isTerminal else { return job }
+        guard job.state != .running else { return job }
+        job.markRunning(now: Date())
+        jobs[id] = job
+        try await store.save(job)
+        return job
+    }
+
     public func cancel(id: UUID) async throws {
         guard !running.contains(id) else {
             throw TransferJobCoordinatorError.jobRunning(id)
