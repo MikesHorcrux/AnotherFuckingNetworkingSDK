@@ -101,6 +101,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_STRICT_CONCURRENCY=complete \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -parallel-testing-enabled NO \
             -skip-testing:AnotherFuckingNetworkingSDKTests/WebSocketLoopbackTests \
             test
       - name: Additional Apple platform product builds (when installed)
