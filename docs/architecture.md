@@ -99,6 +99,9 @@ Policies are values or wrappers, not hidden global switches:
 - WebSocketRecoveryAdapter composes an application-owned cursor/session
   protocol with bounded actor-isolated in-memory or atomic JSON state without
   making the transport core understand wire semantics.
+- JSONWebSocketRecoveryAdapter adds an opt-in `Codable` seam over that opaque
+  state; deterministic encoding and bounded decoding remain separate from
+  reconnect and message replay policy.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.
 - ObservableNetworkPath is a main-actor presentation adapter over those

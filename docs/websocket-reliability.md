@@ -95,9 +95,32 @@ try await recovery.save(
 ~~~
 
 State is limited to 64 KiB per key. JSON writes are atomic and cached after the
-first read; use the in-memory store in tests. The SDK never logs, decodes, or
-replays the payload, and applications should encrypt or redact sensitive
-protocol state before persisting it.
+first read; use the in-memory store in tests. The opaque base adapter never
+logs, decodes, or replays the payload, and applications should encrypt or
+redact sensitive protocol state before persisting it.
+
+For a typed application checkpoint, use the JSON codec-backed adapter:
+
+~~~swift
+struct Checkpoint: Codable, Sendable {
+    let cursor: String
+    let version: Int
+}
+
+let typedRecovery = try JSONWebSocketRecoveryAdapter<Checkpoint>(
+    store: JSONWebSocketRecoveryStore(fileURL: recoveryURL),
+    key: "room-42"
+) { connection, _, checkpoint in
+    try await connection.send(text: "resume:" + (checkpoint?.cursor ?? "none"))
+}
+
+try await typedRecovery.save(Checkpoint(cursor: "cursor-123", version: 123))
+~~~
+
+`JSONWebSocketRecoveryCodec` sorts keys for deterministic persistence and maps
+malformed values to `WebSocketRecoveryStoreError.decodingFailed`. It still
+enforces the 64 KiB bound before writing and leaves replay semantics to the
+application.
 
 ## Backoff and heartbeats
 

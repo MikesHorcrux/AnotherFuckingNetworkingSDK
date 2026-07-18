@@ -6,6 +6,7 @@ public enum WebSocketRecoveryStoreError: LocalizedError, Equatable, Sendable {
     case payloadTooLarge(maximumBytes: Int, actualBytes: Int)
     case corruptDocument
     case encodingFailed
+    case decodingFailed
 
     public var errorDescription: String? {
         switch self {
@@ -17,6 +18,8 @@ public enum WebSocketRecoveryStoreError: LocalizedError, Equatable, Sendable {
             return "The WebSocket recovery store contains invalid JSON."
         case .encodingFailed:
             return "The WebSocket recovery store could not encode its document."
+        case .decodingFailed:
+            return "The WebSocket recovery payload could not be decoded."
         }
     }
 }
@@ -66,6 +69,43 @@ public protocol WebSocketRecoveryStore: Sendable {
         for key: String
     ) async throws
     func remove(for key: String) async throws
+}
+
+/// Encodes application-owned recovery values into bounded state without
+/// coupling the transport to a product protocol.
+public protocol WebSocketRecoveryCodec: Sendable {
+    associatedtype Value: Codable & Sendable
+
+    func encode(_ value: Value) throws -> WebSocketRecoveryState
+    func decode(_ state: WebSocketRecoveryState) throws -> Value
+}
+
+/// A deterministic JSON codec for typed WebSocket recovery values.
+public struct JSONWebSocketRecoveryCodec<Value: Codable & Sendable>:
+    WebSocketRecoveryCodec,
+    Sendable
+{
+    public init() {}
+
+    public func encode(_ value: Value) throws -> WebSocketRecoveryState {
+        let data: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(value)
+        } catch {
+            throw WebSocketRecoveryStoreError.encodingFailed
+        }
+        return try WebSocketRecoveryState(payload: data)
+    }
+
+    public func decode(_ state: WebSocketRecoveryState) throws -> Value {
+        do {
+            return try JSONDecoder().decode(Value.self, from: state.payload)
+        } catch {
+            throw WebSocketRecoveryStoreError.decodingFailed
+        }
+    }
 }
 
 /// An actor-backed recovery store for tests, previews, and in-memory clients.
@@ -232,6 +272,54 @@ public struct WebSocketRecoveryAdapter: Sendable {
 
     public func remove() async throws {
         try await store.remove(for: key)
+    }
+}
+
+/// A typed recovery adapter for applications whose checkpoint is `Codable`.
+public struct JSONWebSocketRecoveryAdapter<Value: Codable & Sendable>: Sendable {
+    private let adapter: WebSocketRecoveryAdapter
+    private let codec: JSONWebSocketRecoveryCodec<Value>
+
+    public init(
+        store: any WebSocketRecoveryStore,
+        key: String,
+        restore: @escaping @Sendable (
+            any WebSocketConnectionProtocol,
+            WebSocketReconnectContext,
+            Value?
+        ) async throws -> Void
+    ) throws {
+        let codec = JSONWebSocketRecoveryCodec<Value>()
+        self.codec = codec
+        self.adapter = try WebSocketRecoveryAdapter(
+            store: store,
+            key: key
+        ) { connection, context, state in
+            try await restore(
+                connection,
+                context,
+                try state.map(codec.decode)
+            )
+        }
+    }
+
+    public var restorerWithContext: WebSocketSessionRestorerWithContext {
+        adapter.restorerWithContext
+    }
+
+    public func restore(
+        _ connection: any WebSocketConnectionProtocol,
+        context: WebSocketReconnectContext
+    ) async throws {
+        try await adapter.restore(connection, context: context)
+    }
+
+    public func save(_ value: Value) async throws {
+        try await adapter.save(codec.encode(value))
+    }
+
+    public func remove() async throws {
+        try await adapter.remove()
     }
 }
 

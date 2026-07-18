@@ -61,8 +61,10 @@ source and tests before relying on any example below.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSocket recovery: WebSocketRecoveryAdapter provides bounded in-memory or
-  JSON cursor/session state for WebSocketReliabilityClient; keep its payload
-  opaque and application-owned.
+  JSON cursor/session state for WebSocketReliabilityClient; use
+  JSONWebSocketRecoveryAdapter for `Codable & Sendable` checkpoints when a
+  typed seam is useful. Keep replay and authentication semantics
+  application-owned, and persist only bounded, redacted/encrypted data.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
   buffering, lifecycle state, Observation adapters, and opt-in
   `WebSocketReliabilityClient` reconnect/heartbeat policies.
