@@ -22,6 +22,121 @@ public enum RequestPathEncoding: Sendable {
     case percentEncoded
 }
 
+/// Defines which HTTP response status codes a request accepts as successful.
+///
+/// Status acceptance is independent of response-body decoding. For example,
+/// accepting `204` or `304` does not by itself allow an empty response body.
+public struct HTTPStatusPolicy: Equatable, Sendable {
+    /// Accepts the standard successful range, `200...299`.
+    public static let successful = Self(storage: .successful)
+
+    /// Accepts every status code.
+    public static let all = Self(storage: .all)
+
+    /// Rejects every status code.
+    public static let none = Self(storage: .ranges([]))
+
+    private enum Storage: Equatable, Sendable {
+        case successful
+        case all
+        case ranges([ClosedRange<Int>])
+    }
+
+    private let storage: Storage
+
+    /// Creates a policy from inclusive status-code ranges.
+    ///
+    /// Overlapping and adjacent ranges are normalized once during creation.
+    /// Supplying no ranges creates ``none``.
+    public init(_ acceptedRanges: ClosedRange<Int>...) {
+        self.init(ranges: acceptedRanges)
+    }
+
+    /// Creates a policy from a collection of inclusive status-code ranges.
+    public init(ranges acceptedRanges: [ClosedRange<Int>]) {
+        storage = Self.normalizedStorage(for: acceptedRanges)
+    }
+
+    /// Creates a policy that accepts only the supplied exact status codes.
+    public static func codes(_ acceptedStatusCodes: Set<Int>) -> Self {
+        Self(ranges: acceptedStatusCodes.map { $0...$0 })
+    }
+
+    /// Returns whether this policy accepts `statusCode`.
+    public func accepts(_ statusCode: Int) -> Bool {
+        switch storage {
+        case .successful:
+            return (200...299).contains(statusCode)
+        case .all:
+            return true
+        case .ranges(let ranges):
+            var lowerBound = 0
+            var upperBound = ranges.count
+
+            while lowerBound < upperBound {
+                let index = lowerBound + (upperBound - lowerBound) / 2
+                let range = ranges[index]
+                if statusCode < range.lowerBound {
+                    upperBound = index
+                } else if statusCode > range.upperBound {
+                    lowerBound = index + 1
+                } else {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    private init(storage: Storage) {
+        self.storage = storage
+    }
+
+    private static func normalizedStorage(
+        for acceptedRanges: [ClosedRange<Int>]
+    ) -> Storage {
+        guard !acceptedRanges.isEmpty else { return .ranges([]) }
+
+        let sortedRanges = acceptedRanges.sorted {
+            if $0.lowerBound == $1.lowerBound {
+                return $0.upperBound < $1.upperBound
+            }
+            return $0.lowerBound < $1.lowerBound
+        }
+        var normalized: [ClosedRange<Int>] = []
+        normalized.reserveCapacity(sortedRanges.count)
+
+        for range in sortedRanges {
+            guard let previous = normalized.last else {
+                normalized.append(range)
+                continue
+            }
+
+            let overlaps = range.lowerBound <= previous.upperBound
+            let isAdjacent = previous.upperBound < Int.max
+                && range.lowerBound == previous.upperBound + 1
+            if overlaps || isAdjacent {
+                let mergedUpperBound = max(
+                    previous.upperBound,
+                    range.upperBound
+                )
+                normalized[normalized.count - 1] =
+                    previous.lowerBound...mergedUpperBound
+            } else {
+                normalized.append(range)
+            }
+        }
+
+        if normalized == [Int.min...Int.max] {
+            return .all
+        }
+        if normalized == [200...299] {
+            return .successful
+        }
+        return .ranges(normalized)
+    }
+}
+
 // MARK: - NetworkError
 
 /// An error produced while constructing, sending, or decoding a network request.
@@ -31,7 +146,7 @@ public enum NetworkError: LocalizedError, Sendable {
     case encodingFailed(any Error)
     case requestConfigurationFailed(any Error)
     case transport(URLError)
-    case requestFailed(statusCode: Int, data: Data?)
+    case requestFailed(HTTPFailure)
     case emptyResponse(statusCode: Int)
     case decodingFailed(any Error)
     case fileOperationFailed(any Error)
@@ -49,8 +164,8 @@ public enum NetworkError: LocalizedError, Sendable {
             return "The URL request could not be configured: \(error.localizedDescription)"
         case .transport(let error):
             return "The request failed before receiving a response: \(error.localizedDescription)"
-        case .requestFailed(let statusCode, _):
-            return "The server returned HTTP \(statusCode)."
+        case .requestFailed(let failure):
+            return "The server returned HTTP \(failure.statusCode)."
         case .emptyResponse(let statusCode):
             return "The server returned an empty HTTP \(statusCode) response."
         case .decodingFailed(let error):
@@ -89,6 +204,10 @@ public protocol HTTPRequest: Sendable {
     /// case-insensitively.
     var headers: [String: String]? { get }
 
+    /// The response status codes accepted by this request. The default is
+    /// ``HTTPStatusPolicy/successful``.
+    var acceptedStatusCodes: HTTPStatusPolicy { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -109,6 +228,7 @@ public extension HTTPRequest {
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
+    var acceptedStatusCodes: HTTPStatusPolicy { .successful }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
@@ -161,23 +281,26 @@ public extension HTTPRequest {
     func customize(_ urlRequest: inout URLRequest) throws {}
 
     private static func isValidPercentEncodedPath(_ path: String) -> Bool {
-        let scalars = Array(path.unicodeScalars)
-        var index = 0
+        let scalars = path.unicodeScalars
+        var index = scalars.startIndex
 
-        while index < scalars.count {
+        while index != scalars.endIndex {
             let scalar = scalars[index]
             if scalar == "%" {
-                guard index + 2 < scalars.count,
-                      scalars[index + 1].isASCIIHexDigit,
-                      scalars[index + 2].isASCIIHexDigit else {
+                let first = scalars.index(after: index)
+                guard first != scalars.endIndex else { return false }
+                let second = scalars.index(after: first)
+                guard second != scalars.endIndex,
+                      scalars[first].isASCIIHexDigit,
+                      scalars[second].isASCIIHexDigit else {
                     return false
                 }
-                index += 3
+                index = scalars.index(after: second)
             } else {
                 guard CharacterSet.urlPathAllowed.contains(scalar) else {
                     return false
                 }
-                index += 1
+                index = scalars.index(after: index)
             }
         }
 
@@ -291,6 +414,32 @@ public struct HTTPResponseMetadata: Equatable, Sendable {
             normalized[name.lowercased()] = headers[name]
         }
         return normalized
+    }
+}
+
+/// The response details retained when an HTTP status is rejected.
+///
+/// ``data`` is the response body when it was available within the operation's
+/// safety limits. In particular, failed downloads omit bodies larger than the
+/// documented limit rather than loading them into memory.
+public struct HTTPFailure: Equatable, Sendable {
+    public let metadata: HTTPResponseMetadata
+    public let data: Data?
+
+    public init(
+        metadata: HTTPResponseMetadata,
+        data: Data? = nil
+    ) {
+        self.metadata = metadata
+        self.data = data
+    }
+
+    public var statusCode: Int { metadata.statusCode }
+    public var url: URL? { metadata.url }
+    public var headers: [String: String] { metadata.headers }
+
+    public func value(forHTTPHeaderField name: String) -> String? {
+        metadata.value(forHTTPHeaderField: name)
     }
 }
 

@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -183,6 +183,10 @@ print(response.value(forHTTPHeaderField: "ETag") ?? "no tag")
 print(response.data.count)
 ```
 
+Rejected HTTP statuses throw `NetworkError.requestFailed(HTTPFailure)`. The
+failure exposes the same status, normalized headers, and final response URL,
+plus the retained response bytes when they are available within safety limits.
+
 Response header names are stored lowercase and looked up case-insensitively. The ordinary `send(_:)` API remains the concise choice when only the decoded value is needed. Metadata-aware services can depend on `any APIClientResponseProtocol`; ordinary services can continue using `any APIClientProtocol`.
 
 For binary or otherwise undecoded bodies, conform to `RawDataRequest`:
@@ -199,6 +203,36 @@ let imageData = try await client.send(
 ```
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
+
+## Request-specific status policies
+
+Requests accept HTTP `200...299` by default. Override `acceptedStatusCodes` when
+an endpoint deliberately uses another status, or when it needs a narrower
+definition of success:
+
+```swift
+struct CreateOrReturnUserRequest: Request {
+    typealias ReturnType = User
+
+    let path = "users"
+    let method = HTTPMethod.post
+    let acceptedStatusCodes = HTTPStatusPolicy(
+        200...299,
+        409...409
+    )
+}
+```
+
+`HTTPStatusPolicy.successful`, `.all`, and `.none` cover common cases. Use
+`HTTPStatusPolicy.codes([201, 204, 304])` for exact codes, or pass one or more
+inclusive ranges. Policies are immutable `Sendable` values, normalized once,
+and captured once before transport suspension. They apply consistently to
+ordinary requests, pagination, uploads, and downloads.
+
+Accepting a status does not relax response-body decoding. A bodyless accepted
+status still requires `EmptyResponse`, `RawDataRequest`, or an explicit
+`allowsEmptyResponseBody` implementation. Rejected statuses retain their
+metadata and body through `NetworkError.requestFailed(HTTPFailure)`.
 
 ## Uploads and downloads
 
@@ -224,6 +258,43 @@ let response = try await client.upload(
 
 Use `.data(payload)` for bytes already in memory. The supplied upload body replaces `Request.body` and bypasses `makeBody(using:)`. Data uploads expose those bytes to `customize(_:)` for signing; file uploads remain file-backed and do not copy their contents into the prepared `URLRequest`.
 
+### Multipart form data
+
+Build a multipart body, pass its content type through the request, and upload the encoded bytes:
+
+```swift
+struct UploadProfileRequest: Request {
+    typealias ReturnType = User
+
+    let userID: Int
+    let contentType: String
+
+    var path: String { "users/\(userID)/profile" }
+    var method: HTTPMethod { .post }
+    var headers: [String: String]? {
+        ["Content-Type": contentType]
+    }
+}
+
+var form = MultipartFormData()
+try form.append("Arthur Dent", name: "displayName")
+try form.append(
+    imageData,
+    name: "avatar",
+    filename: "avatar.jpg",
+    contentType: "image/jpeg"
+)
+
+let response = try await client.upload(
+    UploadProfileRequest(userID: 42, contentType: form.contentType),
+    from: .data(try form.encode())
+)
+```
+
+`MultipartFormData` is deliberately memory-backed: every part and the final encoded body must fit in memory. Use the file-backed upload API for a large raw file; multipart streaming and background multipart uploads are separate lifecycle concerns. Text values are UTF-8 and their line endings are normalized to CRLF. Field names and filenames must be nonempty printable US-ASCII, and explicit content types must be bare `type/subtype` values without parameters.
+
+The default initializer generates a boundary. The throwing `init(boundary:)` is intended for protocols or deterministic tests that require an explicit value: boundaries must contain 1–70 allowed MIME boundary characters and cannot end in a space. `encode()` rejects an empty form or a part containing `--<boundary>` instead of emitting ambiguous framing.
+
 Downloads use the shared `HTTPRequest` construction surface without requiring an unused decoded response type:
 
 ```swift
@@ -241,9 +312,126 @@ print(download.statusCode)
 
 The default moves Foundation's ephemeral download into a unique SDK-owned temporary location before returning; the caller owns that file and removes it when finished. To choose the final location, pass `.file(destinationURL, overwriteExisting: false)`. Existing files are preserved unless overwrite is explicitly `true`, and file-location failures are reported as `NetworkError.fileOperationFailed` with a `FileTransferError` when the problem is caller-correctable.
 
-Successful downloads are never loaded into memory. HTTP failure bodies are included in `NetworkError.requestFailed` only when they are at most 1 MiB; larger download error files produce `data == nil`.
+Successful downloads are never loaded into memory. `NetworkError.requestFailed`
+retains an `HTTPFailure` containing the status, final URL, normalized headers,
+and bounded body data. Failed download bodies are included only when they are at
+most 1 MiB; larger error files produce `failure.data == nil`.
+
+Filesystem validation, bounded error reads, directory creation, moves, and
+replacements run on a dedicated utility queue rather than occupying Swift's
+cooperative executor. Cancellation observed before queued work begins prevents
+the filesystem call. The serialized final-storage phase is the download's
+commit point: once its destination preflight begins, the storage result wins
+over late cancellation so a successfully stored file URL is never hidden.
+Before that point, cancellation, invalid responses, HTTP failures, and storage
+errors trigger a best-effort discard of Foundation's owned temporary file
+without replacing the primary operation error. After a successful return,
+destination ownership and cleanup belong to the caller.
 
 These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
+
+## WebSockets
+
+`APIClient` opens WebSockets with the same base URL, global headers, cookies, authentication handling, and `URLSession` as ordinary requests. An `https` base URL becomes `wss`; `http` becomes `ws`.
+
+```swift
+struct ChatSocket: WebSocketRequest {
+    let roomID: String
+
+    var path: String { "rooms/\(roomID)/socket" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "history", value: "10")]
+    }
+    var headers: [String: String]? {
+        ["Authorization": "Bearer TOKEN"]
+    }
+    var subprotocols: [String] { ["chat.v1"] }
+    var maximumMessageSize: Int? { 1_048_576 }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        .init(maximumMessages: 64, maximumBytes: 8 * 1_024 * 1_024)
+    }
+}
+
+let connection = try await client.connect(ChatSocket(roomID: "lobby"))
+
+let lifecycleTask = Task {
+    for await state in connection.states {
+        print(state)
+    }
+}
+
+try await connection.send(text: "hello")
+let firstMessage = try await connection.receive()
+
+for try await message in connection.messages {
+    print(message)
+    break
+}
+
+try await connection.ping()
+try await connection.close(code: .normalClosure, reason: "Done")
+```
+
+Use either `receive()` or `messages`; only one public receive may be active on a
+connection at a time. After the handshake, the SDK continuously keeps one
+Foundation receive armed so peer closure is observable even while the
+application is idle. Complete messages are retained FIFO until a consumer asks
+for them. Messages accepted before closure remain drainable; a normal or
+going-away close then ends `messages`, while abnormal closure is thrown. `close`
+starts the closing handshake and returns without waiting for the peer to finish
+it. Services can depend on `any WebSocketClientProtocol`, and can retain the
+returned `any WebSocketConnectionProtocol` without depending on `APIClient`
+directly.
+
+`inboundBufferingPolicy` bounds that retained FIFO. Its default is 64 messages
+and 8 MiB of aggregate text UTF-8 or binary payload bytes. Exceeding either
+limit rejects the incoming message, cancels the connection, preserves the
+already accepted prefix for draining, and then throws
+`WebSocketError.inboundBufferOverflow` with counts that do not retain the
+rejected payload. `maximumMessageSize` remains Foundation's per-message limit;
+the buffering policy is an aggregate retained-payload limit. Because one
+Foundation message may be in flight, it is not a strict peak-memory ceiling.
+
+The `AnotherFuckingNetworkingSDKTesting` product mirrors those semantics.
+`MockWebSocketClient` includes the policy in exact-stub matching and structured
+request records. `MockWebSocketConnection` accepts a validating custom-policy
+initializer, exposes buffered message and payload-byte counts, delivers
+directly to a waiting receiver without retaining the payload, and preserves an
+accepted prefix across normal closure, injected failure, or typed overflow.
+`reset()` clears that buffered and terminal state while retaining the mock's
+immutable policy.
+
+`states` emits an immediate lifecycle snapshot, pushes later `.open`,
+`.closing`, and `.closed` transitions, and finishes after closure. Each
+subscriber has a newest-only buffer, so an idle or slow observer cannot grow
+memory without bound. The SDK connection and `MockWebSocketConnection` both
+push peer closure without requiring a `state` poll or another I/O operation.
+Custom `WebSocketConnectionProtocol` conformers keep source compatibility via
+a one-snapshot default and can override `states` when they have push events.
+
+On iOS 17 or macOS 14 and newer, a main-actor Observation adapter can bridge
+that sequence directly into UI state while the connection remains actor
+isolated off the main actor:
+
+```swift
+@MainActor
+func makeSocketModel(
+    for connection: any WebSocketConnectionProtocol
+) -> ObservableWebSocketState {
+    ObservableWebSocketState(connection: connection)
+}
+```
+
+Rejected upgrades throw `WebSocketError.handshakeFailed` with status and response-header metadata. URL, subprotocol, reserved-header, message-size, transport, and close failures remain distinct cases. `APIClient` installs a task-specific delegate to observe the upgrade and close lifecycle; authentication, redirects, cookies, metrics, and the intercepted lifecycle events still flow through the injected session's delegate. Do not install a competing task-specific delegate from `urlSession(_:didCreateTask:)` for these WebSocket tasks.
+
+Cancellation is connection-scoped. Cancelling an active `connect`, `send`,
+`receive`, or `ping` preserves `CancellationError` and cancels the underlying
+socket task, closing that connection for every task that shares it. Breaking a
+`messages` loop stops consumer demand, but the SDK receive pump remains active;
+the bounded policy therefore still applies while that consumer is idle.
+Cancelling an in-flight iteration closes the connection.
+
+The SDK deliberately does not reconnect automatically or choose a heartbeat schedule. Reconnect backoff, session restoration, and ping intervals/timeouts are application policy; call `ping()` directly or build that policy around `WebSocketClientProtocol`.
 
 ## Empty responses
 
@@ -317,8 +505,10 @@ do {
         print("Could not configure the request: \(underlying)")
     case .transport(let urlError):
         print("Transport failed with \(urlError.code)")
-    case .requestFailed(let statusCode, let data):
-        print("HTTP \(statusCode), body bytes: \(data?.count ?? 0)")
+    case .requestFailed(let failure):
+        print("HTTP \(failure.statusCode), body bytes: \(failure.data?.count ?? 0)")
+        let requestID = failure.value(forHTTPHeaderField: "X-Request-ID")
+        print("Request ID: \(requestID ?? "unknown")")
     case .emptyResponse(let statusCode):
         print("HTTP \(statusCode) did not contain the expected body")
     case .decodingFailed(let underlying):
@@ -331,7 +521,51 @@ do {
 }
 ```
 
-HTTP error bodies are preserved as `Data?` for endpoint-specific decoding. Standard URL failures remain inspectable as `URLError` inside `.transport`.
+`HTTPFailure` preserves response status, final URL, normalized headers, and
+optional response `Data` for endpoint-specific decoding or retry decisions.
+Standard URL failures remain inspectable as `URLError` inside `.transport`.
+
+## Activity streams and Observation
+
+Inject `NetworkActivityMonitor` when an app needs privacy-safe request state.
+Monitoring is opt-in, so clients without a monitor keep the direct request fast
+path. Snapshots contain counts only—never URLs, headers, bodies, or errors—and
+each subscriber uses a newest-only buffer so a slow UI cannot grow memory
+without bound.
+
+```swift
+let monitor = NetworkActivityMonitor()
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    activityMonitor: monitor
+)
+
+let activityTask = Task {
+    for await snapshot in monitor.snapshots() {
+        print(snapshot.totalActiveCount)
+    }
+}
+
+_ = try await client.send(GetUserRequest(userID: 42))
+activityTask.cancel()
+```
+
+The all-platform stream supports the package's iOS 15 and macOS 12 floor. On
+iOS 17 or macOS 14 and newer, `ObservableNetworkActivity` provides a
+main-actor `@Observable` presentation model with separate properties for HTTP
+requests, uploads, downloads, WebSocket handshakes, and outcomes:
+
+```swift
+@MainActor
+func makeActivityModel(
+    for monitor: NetworkActivityMonitor
+) -> ObservableNetworkActivity {
+    ObservableNetworkActivity(monitor: monitor)
+}
+```
+
+Only the small presentation adapter runs on the main actor. URL construction,
+encoding, URLSession work, logging, and decoding remain outside it.
 
 ## Safe request logging
 
@@ -340,7 +574,8 @@ Logging is disabled unless a logger is passed to the client.
 ```swift
 let logger = NetworkingLogger(
     configuration: .init(
-        bodyPolicy: .redactedJSON(maximumBytes: 16_384)
+        bodyPolicy: .redactedJSON(maximumBytes: 16_384),
+        minimumLevel: .info
     )
 )
 
@@ -352,7 +587,7 @@ let client = APIClient(
 
 The logger redacts URL paths by default because identifiers and reset tokens often appear in path components. It also redacts common authorization, cookie, API-key, token, password, secret, and OAuth-code fields; recursively redacts configured JSON keys; omits invalid, binary, or oversized bodies; removes URL credentials and fragments; sorts output deterministically; and POSIX-quotes cURL arguments.
 
-Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API.
+Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API. Raising `minimumLevel` skips lower-level message construction entirely; for example, `.info` avoids building request cURL strings.
 
 You can inject a `Sendable` sink for tests or another logging backend:
 
@@ -456,9 +691,105 @@ await mock.stubResponse(
 )
 ```
 
-Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
+Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Successful stubs are checked against the invoking request's status policy; use metadata-aware stubs when a request excludes `200`. A status policy controls response interpretation, so it is intentionally excluded from exact-stub wire identity and recordings. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
 
-Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures, injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
+Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
+
+Transfer services can inject the same mock through `APIClientTransferProtocol`:
+
+```swift
+let transferMock = MockAPIClient()
+let transferClient: any APIClientTransferProtocol = transferMock
+let sourceURL = URL(fileURLWithPath: "/fixtures/avatar.jpg")
+
+await transferMock.stubUpload(
+    UploadAvatarRequest.self,
+    with: HTTPResponse(
+        value: User(id: 42, displayName: "Arthur"),
+        metadata: HTTPResponseMetadata(statusCode: 201)
+    )
+)
+await transferMock.stubDownload(
+    ExportRequest.self,
+    using: { transfer in
+        DownloadResponse(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("mock-download-\(transfer.sequenceID)"),
+            metadata: HTTPResponseMetadata(statusCode: 200)
+        )
+    }
+)
+
+let upload = try await transferClient.upload(
+    UploadAvatarRequest(userID: 42),
+    from: .file(sourceURL)
+)
+let firstDownload = try await transferClient.download(
+    ExportRequest(exportID: "latest")
+)
+let secondDownload = try await transferClient.download(
+    ExportRequest(exportID: "latest")
+)
+let transfers = await transferMock.recordedTransfers
+```
+
+Mock transfers perform no filesystem I/O. Upload and download success stubs still
+enforce the invoking request's status policy; a rejected mock download carries
+`failure.data == nil` because the mock never reads its file URL. A file upload
+source does not need to exist, download destinations are matched and recorded
+without being created or replaced, and a `DownloadResponse` returns exactly the
+URL supplied by its stub. Consequently, the mock does not reproduce production
+failures for missing or unreadable sources and existing destinations; cover
+those policies with `APIClient` transfer tests. Use a download factory, as
+above, when repeated temporary downloads need distinct URLs.
+`recordedTransfers` preserves invocation order and includes the final URL,
+headers, request body, upload source, or download destination. Transfer sequence
+IDs remain monotonic for the mock's lifetime, including across
+`clearRecordedTransfers()` and `reset()`, so in-flight factories cannot reuse an
+identifier. Clearing records leaves stubs intact; `reset()` clears all stubs and
+recordings.
+
+WebSocket services can use the same protocol-based pattern with
+`MockWebSocketClient` and `MockWebSocketConnection`:
+
+```swift
+let socket = MockWebSocketConnection(
+    url: URL(string: "wss://api.example.com/rooms/lobby/socket")!,
+    negotiatedSubprotocol: "chat.v1",
+    incoming: [
+        .success(.text("welcome")),
+        .success(.binary(Data([0x01, 0x02])))
+    ]
+)
+let socketClient = MockWebSocketClient(
+    baseURL: URL(string: "https://api.example.com")
+)
+await socketClient.stub(ChatSocket.self, with: socket)
+
+let connection = try await socketClient.connect(
+    ChatSocket(roomID: "lobby")
+)
+try await connection.send(text: "hello")
+
+#expect(try await connection.receive() == .text("welcome"))
+#expect(await socket.sentMessages == [.text("hello")])
+```
+
+The client supports type-wide and exact request stubs, errors, and async
+connection factories. Exact matching uses the fully constructed handshake,
+including the final URL and headers, ordered subprotocols, and maximum message
+size. Factories are recommended when every connect should receive an independent
+connection.
+
+The connection mock consumes incoming messages, send results, and ping results
+in FIFO order. It mirrors production's single-active-receive rule and treats an
+operation failure or cancellation as connection-scoped. A pending receiver can
+be completed with `enqueueIncoming`, `finish`, or `fail`. Its unified
+`recordedOperations` sequence preserves the order of sends, receives, pings, and
+closes without wall-clock sleeps or live networking. Request and operation
+sequence IDs remain monotonic for each mock's lifetime, including across clear
+and reset calls. Its `states` sequence mirrors production lifecycle events and
+starts a fresh open sequence after `reset()`.
 
 ## 1.x to 2.x migration
 
@@ -467,6 +798,7 @@ Version 2 is a deliberate major-version modernization:
 - Adopt Swift 6.
 - Add `Sendable` to request and decoded response types.
 - Import `AnotherFuckingNetworkingSDKTesting` in tests and change mock setup or inspection to use `await`.
+- Replace hand-written socket doubles with `MockWebSocketClient` and `MockWebSocketConnection` where deterministic queue behavior is sufficient.
 - Add `try` when registering exact request-instance stubs; URL or body construction can now fail explicitly.
 - Replace mock inheritance assumptions with `any APIClientProtocol` injection.
 - Replace `APIClient` subclasses with protocol-based wrappers or injected `APIClientProtocol` values; `APIClient` is now `final`.
@@ -476,6 +808,13 @@ Version 2 is a deliberate major-version modernization:
 - Handle `.transport`, `.encodingFailed`, `.invalidResponse`, and `.emptyResponse` in `NetworkError` switches.
 - Handle `.requestConfigurationFailed` when request customization is used.
 - Handle `.fileOperationFailed` when using file-backed transfers.
+- Replace `.requestFailed(let statusCode, let data)` patterns with
+  `.requestFailed(let failure)`, then read `failure.statusCode`, `failure.data`,
+  `failure.url`, or `failure.headers`. Construct explicit failures with
+  `.requestFailed(HTTPFailure(metadata:data:))`.
+- Add `acceptedStatusCodes` to requests that intentionally accept non-2xx
+  responses or reject part of the default `200...299` range. Existing request
+  conformers inherit `.successful`; successful mock stubs now enforce it.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.
@@ -490,9 +829,18 @@ Run the test and strict concurrency gates:
 ```sh
 swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 swift test -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+swift build -c release --enable-parseable-module-interfaces \
+  -Xswiftc -enable-library-evolution \
+  -Xswiftc -strict-concurrency=complete \
+  -Xswiftc -warnings-as-errors
 ```
 
-The suite uses isolated `URLProtocol` handlers rather than live network calls and is safe to run in parallel. CI also performs unsigned iOS 15 release builds for both public products.
+HTTP tests use isolated `URLProtocol` handlers rather than external network
+calls and are safe to run in parallel. A serialized, dependency-free server on
+an ephemeral `127.0.0.1` port verifies Foundation's real WebSocket upgrade,
+framing, ping, close, rejection, metrics, and delegate paths. CI also verifies
+parseable library-evolution interfaces and unsigned iOS 15 distribution builds
+for both public products.
 
 ## License
 

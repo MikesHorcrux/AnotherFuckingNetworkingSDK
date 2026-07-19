@@ -351,23 +351,137 @@ struct APIClientTransportTests {
         }
     }
 
-    @Test("Non-2xx responses preserve status and body")
+    @Test("Non-2xx responses preserve metadata and body")
     func statusFailure() async throws {
         let body = Data(#"{"message":"unauthorized"}"#.utf8)
+        let finalURL = URL(string: "https://edge.example.com/v2/users/1")!
         let stub = StubSession { request in
-            .respond(try .http(for: request, statusCode: 401, data: body))
+            .respond(try .http(
+                for: request,
+                responseURL: finalURL,
+                statusCode: 401,
+                headers: [
+                    "Retry-After": "30",
+                    "X-Request-ID": "request-1"
+                ],
+                data: body
+            ))
         }
 
         do {
             _ = try await stub.client().send(GetUserRequest(id: 1))
             Issue.record("Expected a status error")
         } catch let error as NetworkError {
-            guard case .requestFailed(let statusCode, let errorBody) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(statusCode == 401)
-            #expect(errorBody == body)
+            #expect(failure.statusCode == 401)
+            #expect(failure.data == body)
+            #expect(failure.url == finalURL)
+            #expect(failure.value(forHTTPHeaderField: "retry-after") == "30")
+            #expect(failure.value(forHTTPHeaderField: "X-REQUEST-ID") == "request-1")
+        }
+    }
+
+    @Test("The default status policy accepts the complete 2xx boundary", arguments: [200, 299])
+    func defaultStatusSuccessBoundaries(statusCode: Int) async throws {
+        let body = Data(#"{"id":1,"displayName":"Accepted"}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: statusCode,
+                data: body
+            ))
+        }
+
+        let response = try await stub.client().sendResponse(
+            GetUserRequest(id: 1)
+        )
+
+        #expect(response.statusCode == statusCode)
+        #expect(response.value == TestUser(id: 1, displayName: "Accepted"))
+    }
+
+    @Test("Requests can widen or narrow accepted response statuses")
+    func requestSpecificStatusPolicy() async throws {
+        let body = Data(#"{"id":1,"displayName":"Policy"}"#.utf8)
+        let acceptedStub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: body
+            ))
+        }
+        let accepted = try await acceptedStub.client().sendResponse(
+            StatusPolicyRequest(acceptedStatusCodes: .codes([409]))
+        )
+        #expect(accepted.statusCode == 409)
+        #expect(accepted.value == TestUser(id: 1, displayName: "Policy"))
+
+        let rejectedStub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 299,
+                data: body
+            ))
+        }
+        do {
+            _ = try await rejectedStub.client().send(
+                StatusPolicyRequest(acceptedStatusCodes: .codes([201]))
+            )
+            Issue.record("Expected the request-specific status rejection")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 299)
+            #expect(failure.data == body)
+        }
+    }
+
+    @Test("A response status policy is captured once before transport suspension")
+    func statusPolicySnapshot() async throws {
+        let state = LockedBox((
+            reads: 0,
+            policy: HTTPStatusPolicy.codes([202])
+        ))
+        let body = Data(#"{"id":1,"displayName":"Snapshot"}"#.utf8)
+        let stub = StubSession { request in
+            state.withLock { $0.policy = .none }
+            return .respond(try .http(
+                for: request,
+                statusCode: 202,
+                data: body
+            ))
+        }
+
+        let response = try await stub.client().sendResponse(
+            SnapshotStatusPolicyRequest(state: state)
+        )
+
+        #expect(response.statusCode == 202)
+        #expect(state.withLock { $0.reads } == 1)
+    }
+
+    @Test("Status acceptance remains independent from empty-body acceptance")
+    func statusPolicyDoesNotAcceptEmptyBody() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, statusCode: 304))
+        }
+
+        do {
+            _ = try await stub.client().send(StatusPolicyRequest(
+                acceptedStatusCodes: .codes([304])
+            ))
+            Issue.record("Expected the accepted status to fail body decoding")
+        } catch let error as NetworkError {
+            guard case .emptyResponse(let statusCode) = error else {
+                Issue.record("Expected emptyResponse, got \(error)")
+                return
+            }
+            #expect(statusCode == 304)
         }
     }
 
@@ -381,11 +495,11 @@ struct APIClientTransportTests {
             _ = try await stub.client().send(GetUserRequest(id: 1))
             Issue.record("Expected HTTP \(statusCode) to fail")
         } catch let error as NetworkError {
-            guard case .requestFailed(let actual, _) = error else {
+            guard case .requestFailed(let failure) = error else {
                 Issue.record("Expected requestFailed, got \(error)")
                 return
             }
-            #expect(actual == statusCode)
+            #expect(failure.statusCode == statusCode)
         }
     }
 
@@ -536,6 +650,27 @@ private struct HeaderRequest: Request {
     typealias ReturnType = TestUser
     let path = "users/1"
     let headers: [String: String]? = ["Authorization": "Bearer request"]
+}
+
+private struct StatusPolicyRequest: Request {
+    typealias ReturnType = TestUser
+
+    let acceptedStatusCodes: HTTPStatusPolicy
+    let path = "status-policy"
+}
+
+private struct SnapshotStatusPolicyRequest: Request {
+    typealias ReturnType = TestUser
+
+    let state: LockedBox<(reads: Int, policy: HTTPStatusPolicy)>
+    let path = "status-policy-snapshot"
+
+    var acceptedStatusCodes: HTTPStatusPolicy {
+        state.withLock {
+            $0.reads += 1
+            return $0.policy
+        }
+    }
 }
 
 private struct DuplicateHeaderRequest: Request {

@@ -9,11 +9,12 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
 
         static func http(
             for request: URLRequest,
+            responseURL: URL? = nil,
             statusCode: Int = 200,
             headers: [String: String]? = nil,
             data: Data = Data()
         ) throws -> Self {
-            let url = try #require(request.url)
+            let url = try #require(responseURL ?? request.url)
             let response = try #require(HTTPURLResponse(
                 url: url,
                 statusCode: statusCode,
@@ -136,7 +137,10 @@ final class StubSession: @unchecked Sendable {
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
-        logger: NetworkingLogger? = nil
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil,
+        fileIOExecutor: FileIOExecutor = .shared,
+        downloadOperation: DownloadOperation? = nil
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
@@ -144,7 +148,20 @@ final class StubSession: @unchecked Sendable {
             globalHeaders: globalHeaders,
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
-            logger: logger
+            logger: logger,
+            activityMonitor: activityMonitor,
+            fileIOExecutor: fileIOExecutor,
+            downloadOperation: downloadOperation,
+            webSocketTransportFactory: {
+                session, request, configuration in
+                URLSessionWebSocketTransport(
+                    session: session,
+                    request: request,
+                    maximumMessageSize: configuration.maximumMessageSize,
+                    inboundBufferingPolicy:
+                        configuration.inboundBufferingPolicy
+                )
+            }
         )
     }
 }

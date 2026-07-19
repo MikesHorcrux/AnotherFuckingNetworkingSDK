@@ -6,10 +6,10 @@ import OSLog
 /// Raw requests and response bodies are sanitized before they reach the sink.
 /// The default sink writes the sanitized message to unified logging.
 public struct NetworkingLogger: Sendable {
-    public enum Level: Equatable, Sendable {
-        case debug
-        case info
-        case error
+    public enum Level: Int, Equatable, Sendable {
+        case debug = 0
+        case info = 1
+        case error = 2
     }
 
     /// Controls whether a request or response body may appear in a log message.
@@ -75,6 +75,7 @@ public struct NetworkingLogger: Sendable {
         public let redactionPlaceholder: String
         public let redactsURLFragment: Bool
         public let urlPathPolicy: URLPathPolicy
+        public let minimumLevel: Level
 
         public init(
             redactedHeaders: Set<String> = Self.defaultRedactedHeaders,
@@ -83,7 +84,8 @@ public struct NetworkingLogger: Sendable {
             bodyPolicy: BodyPolicy = .omitted,
             redactionPlaceholder: String = "<redacted>",
             redactsURLFragment: Bool = true,
-            urlPathPolicy: URLPathPolicy = .redacted
+            urlPathPolicy: URLPathPolicy = .redacted,
+            minimumLevel: Level = .debug
         ) {
             self.redactedHeaders = Self.normalized(redactedHeaders)
             self.redactedQueryItems = Self.normalized(redactedQueryItems)
@@ -92,6 +94,7 @@ public struct NetworkingLogger: Sendable {
             self.redactionPlaceholder = redactionPlaceholder
             self.redactsURLFragment = redactsURLFragment
             self.urlPathPolicy = urlPathPolicy
+            self.minimumLevel = minimumLevel
         }
 
         fileprivate static func normalizedKey(_ value: String) -> String {
@@ -123,20 +126,27 @@ public struct NetworkingLogger: Sendable {
 
     /// Emits a sanitized cURL representation of a request.
     public func log(request: URLRequest) {
+        guard shouldLog(.debug) else { return }
         sink(.debug, "Outgoing request:\n\(curlCommand(for: request))")
     }
 
     /// Emits a sanitized HTTP response summary.
     public func log(response: URLResponse, data: Data) {
         guard let response = response as? HTTPURLResponse else {
+            guard shouldLog(.error) else { return }
             sink(.error, "Received a non-HTTP response.")
             return
         }
+        guard shouldLog(.info) else { return }
 
         let url = response.url.map { sanitizedURL($0).absoluteString }
             ?? "<unknown URL>"
         let body = sanitizedBody(data).description
         sink(.info, "Response \(response.statusCode) from \(url):\n\(body)")
+    }
+
+    private func shouldLog(_ level: Level) -> Bool {
+        level.rawValue >= configuration.minimumLevel.rawValue
     }
 
     /// Returns a shell-safe cURL command containing only sanitized values.

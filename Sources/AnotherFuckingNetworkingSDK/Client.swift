@@ -42,12 +42,27 @@ public extension APIClientTransferProtocol {
     }
 }
 
+package struct WebSocketTransportConfiguration: Sendable {
+    package let maximumMessageSize: Int?
+    package let inboundBufferingPolicy: WebSocketInboundBufferingPolicy
+}
+
+typealias WebSocketTransportFactory = @Sendable (
+    URLSession,
+    URLRequest,
+    WebSocketTransportConfiguration
+) -> any WebSocketTransport
+
+typealias DownloadOperation = @Sendable (
+    URLRequest
+) async throws -> (URL, URLResponse)
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientTransferProtocol, Sendable {
+public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -77,35 +92,72 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
 
     /// The complete current configuration snapshot.
     public var configuration: Configuration {
-        get { state.withLock { $0 } }
-        set { state.withLock { $0 = newValue } }
+        get { state.withCriticalRegion { $0 } }
+        set { state.withCriticalRegion { $0 = newValue } }
     }
 
     /// The root URL used to resolve request paths.
     public var baseURL: URL? {
-        get { state.withLock { $0.baseURL } }
-        set { state.withLock { $0.baseURL = newValue } }
+        get { state.withCriticalRegion { $0.baseURL } }
+        set { state.withCriticalRegion { $0.baseURL = newValue } }
     }
 
     /// Headers applied to every request unless overridden by a request header.
     public var globalHeaders: [String: String] {
-        get { state.withLock { $0.globalHeaders } }
-        set { state.withLock { $0.globalHeaders = newValue } }
+        get { state.withCriticalRegion { $0.globalHeaders } }
+        set { state.withCriticalRegion { $0.globalHeaders = newValue } }
     }
 
-    private let state: Locked<Configuration>
+    private let state: CriticalState<Configuration>
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
+    private let activityMonitor: NetworkActivityMonitor?
+    private let fileIOExecutor: FileIOExecutor
+    private let downloadOperation: DownloadOperation
+    private let webSocketTransportFactory: WebSocketTransportFactory
 
-    public init(
+    public convenience init(
         baseURL: URL? = nil,
         urlSession: URLSession = .shared,
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
-        logger: NetworkingLogger? = nil
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil
     ) {
-        state = Locked(
+        self.init(
+            baseURL: baseURL,
+            urlSession: urlSession,
+            globalHeaders: globalHeaders,
+            encoderFactory: encoderFactory,
+            decoderFactory: decoderFactory,
+            logger: logger,
+            activityMonitor: activityMonitor,
+            webSocketTransportFactory: { session, request, configuration in
+                URLSessionWebSocketTransport(
+                    session: session,
+                    request: request,
+                    maximumMessageSize: configuration.maximumMessageSize,
+                    inboundBufferingPolicy:
+                        configuration.inboundBufferingPolicy
+                )
+            }
+        )
+    }
+
+    init(
+        baseURL: URL? = nil,
+        urlSession: URLSession = .shared,
+        globalHeaders: [String: String] = [:],
+        encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
+        decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil,
+        fileIOExecutor: FileIOExecutor = .shared,
+        downloadOperation: DownloadOperation? = nil,
+        webSocketTransportFactory: @escaping WebSocketTransportFactory
+    ) {
+        state = CriticalState(
             Configuration(
                 baseURL: baseURL,
                 globalHeaders: globalHeaders,
@@ -115,13 +167,80 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         )
         self.urlSession = urlSession
         self.logger = logger
+        self.activityMonitor = activityMonitor
+        self.fileIOExecutor = fileIOExecutor
+        self.downloadOperation = downloadOperation ?? { request in
+            try await urlSession.download(for: request)
+        }
+        self.webSocketTransportFactory = webSocketTransportFactory
     }
 
     /// Atomically updates multiple configuration values.
     public func updateConfiguration(
         _ update: @Sendable (inout Configuration) -> Void
     ) {
-        state.withLock(update)
+        state.withCriticalRegion(update)
+    }
+
+    /// Opens a WebSocket after its HTTP upgrade handshake succeeds.
+    ///
+    /// The connection uses the same base URL, global headers, cookies,
+    /// authentication challenges, and URL session as ordinary requests.
+    public func connect<R: WebSocketRequest>(
+        _ request: R
+    ) async throws -> any WebSocketConnectionProtocol {
+        guard let activityMonitor else {
+            return try await connectWithoutMonitoring(request)
+        }
+        return try await activityMonitor.track(.webSocketHandshake) {
+            try await self.connectWithoutMonitoring(request)
+        }
+    }
+
+    private func connectWithoutMonitoring<R: WebSocketRequest>(
+        _ request: R
+    ) async throws -> any WebSocketConnectionProtocol {
+        try Task.checkCancellation()
+        let configuration = state.withCriticalRegion { $0 }
+        let preparedRequest = try WebSocketRequestBuilder.prepare(
+            request,
+            baseURL: configuration.baseURL,
+            globalHeaders: configuration.globalHeaders
+        )
+        let urlRequest = preparedRequest.urlRequest
+        try Task.checkCancellation()
+        guard let url = urlRequest.url else {
+            throw WebSocketError.invalidURL
+        }
+
+        logger?.log(request: urlRequest)
+        let transport = webSocketTransportFactory(
+            urlSession,
+            urlRequest,
+            preparedRequest.transportConfiguration
+        )
+
+        do {
+            let negotiatedSubprotocol = try await transport.open()
+            try Task.checkCancellation()
+            return WebSocketConnection(
+                url: url,
+                negotiatedSubprotocol: negotiatedSubprotocol,
+                transport: transport
+            )
+        } catch {
+            if Task.isCancelled || error is CancellationError {
+                transport.cancel()
+                throw CancellationError()
+            }
+            if let error = error as? WebSocketError {
+                throw error
+            }
+            if let error = error as? URLError {
+                throw WebSocketError.transport(error)
+            }
+            throw WebSocketError.unknown(error)
+        }
     }
 
     /// Sends a request and decodes its declared response type.
@@ -133,13 +252,28 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
     public func sendResponse<R: Request>(
         _ request: R
     ) async throws -> HTTPResponse<R.ReturnType> {
+        guard let activityMonitor else {
+            return try await sendResponseWithoutMonitoring(request)
+        }
+        return try await activityMonitor.track(.request) {
+            try await self.sendResponseWithoutMonitoring(request)
+        }
+    }
+
+    private func sendResponseWithoutMonitoring<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
-        let configuration = state.withLock { $0 }
+        let acceptedStatusCodes = request.acceptedStatusCodes
+        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
         )
-        let (data, httpResponse) = try await performDataRequest(urlRequest) {
+        let (data, httpResponse) = try await performDataRequest(
+            urlRequest,
+            acceptedStatusCodes: acceptedStatusCodes
+        ) {
             try await self.urlSession.data(for: urlRequest)
         }
         return try Self.makeResponse(
@@ -170,15 +304,30 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         _ request: R,
         from body: UploadBody
     ) async throws -> HTTPResponse<R.ReturnType> {
+        guard let activityMonitor else {
+            return try await uploadWithoutMonitoring(request, from: body)
+        }
+        return try await activityMonitor.track(.upload) {
+            try await self.uploadWithoutMonitoring(request, from: body)
+        }
+    }
+
+    private func uploadWithoutMonitoring<R: Request>(
+        _ request: R,
+        from body: UploadBody
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
-        let configuration = state.withLock { $0 }
+        let acceptedStatusCodes = request.acceptedStatusCodes
+        let configuration = state.withCriticalRegion { $0 }
 
         let bodySource: RequestBodySource
         switch body {
         case .data(let data):
             bodySource = .provided(data)
         case .file(let fileURL):
-            try Self.validateUploadSource(fileURL)
+            try await fileIOExecutor.run {
+                try Self.validateUploadSource(fileURL)
+            }
             bodySource = .provided(nil)
         }
 
@@ -191,11 +340,17 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         let result: (Data, HTTPURLResponse)
         switch body {
         case .data(let data):
-            result = try await performDataRequest(urlRequest) {
+            result = try await performDataRequest(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes
+            ) {
                 try await self.urlSession.upload(for: urlRequest, from: data)
             }
         case .file(let fileURL):
-            result = try await performDataRequest(urlRequest) {
+            result = try await performDataRequest(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes
+            ) {
                 try await self.urlSession.upload(for: urlRequest, fromFile: fileURL)
             }
         }
@@ -209,13 +364,32 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
     }
 
     /// Downloads a response body directly to a durable file location.
+    ///
+    /// Cancellation wins before the serialized final-storage phase starts.
+    /// Once destination preflight begins, the storage result wins over a late
+    /// cancellation so a successfully stored file URL is never hidden.
     public func download<R: DownloadRequest>(
         _ request: R,
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
+        guard let activityMonitor else {
+            return try await downloadWithoutMonitoring(request, to: destination)
+        }
+        return try await activityMonitor.trackCommitted(.download) {
+            try await self.downloadWithoutMonitoring(request, to: destination)
+        }
+    }
+
+    private func downloadWithoutMonitoring<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination
+    ) async throws -> DownloadResponse {
         try Task.checkCancellation()
-        try Self.validateDownloadDestination(destination)
-        let configuration = state.withLock { $0 }
+        let acceptedStatusCodes = request.acceptedStatusCodes
+        try await fileIOExecutor.run {
+            try Self.validateDownloadDestination(destination)
+        }
+        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -227,45 +401,57 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         let temporaryURL: URL
         let response: URLResponse
         do {
-            (temporaryURL, response) = try await urlSession.download(for: urlRequest)
+            (temporaryURL, response) = try await downloadOperation(urlRequest)
         } catch {
             try Self.throwTransportError(error)
         }
 
-        try Task.checkCancellation()
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger?.log(response: response, data: Data())
-            throw NetworkError.invalidResponse
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let errorData = Self.readDownloadErrorData(at: temporaryURL)
-            logger?.log(response: response, data: errorData ?? Data())
-            throw NetworkError.requestFailed(
-                statusCode: httpResponse.statusCode,
-                data: errorData
-            )
-        }
-
-        logger?.log(response: response, data: Data())
-        let storedURL: URL
         do {
-            storedURL = try Self.storeDownloadedFile(
-                at: temporaryURL,
-                destination: destination
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as NetworkError {
-            throw error
-        } catch {
-            throw NetworkError.fileOperationFailed(error)
-        }
+            try Task.checkCancellation()
+            guard let httpResponse = response as? HTTPURLResponse else {
+                logger?.log(response: response, data: Data())
+                try Task.checkCancellation()
+                throw NetworkError.invalidResponse
+            }
 
-        return DownloadResponse(
-            fileURL: storedURL,
-            metadata: HTTPResponseMetadata(httpResponse)
-        )
+            guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+                let errorData = try await fileIOExecutor.run {
+                    Self.readDownloadErrorData(at: temporaryURL)
+                }
+                logger?.log(response: response, data: errorData ?? Data())
+                try Task.checkCancellation()
+                throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                    response: httpResponse,
+                    data: errorData
+                ))
+            }
+
+            logger?.log(response: response, data: Data())
+            try Task.checkCancellation()
+            let storedURL: URL
+            do {
+                storedURL = try await fileIOExecutor.runCommitted {
+                    try Self.storeDownloadedFile(
+                        at: temporaryURL,
+                        destination: destination
+                    )
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as NetworkError {
+                throw error
+            } catch {
+                throw NetworkError.fileOperationFailed(error)
+            }
+
+            return DownloadResponse(
+                fileURL: storedURL,
+                metadata: HTTPResponseMetadata(httpResponse)
+            )
+        } catch {
+            await discardDownloadedFile(at: temporaryURL)
+            throw error
+        }
     }
 
     private enum RequestBodySource: Sendable {
@@ -296,6 +482,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
 
         switch bodySource {
         case .encoded:
+            try Task.checkCancellation()
             do {
                 urlRequest.httpBody = try request.makeBody(
                     using: configuration.encoderFactory()
@@ -305,6 +492,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
             } catch {
                 throw NetworkError.encodingFailed(error)
             }
+            try Task.checkCancellation()
         case .provided(let data):
             urlRequest.httpBody = data
         }
@@ -316,12 +504,14 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         } catch {
             throw NetworkError.requestConfigurationFailed(error)
         }
+        try Task.checkCancellation()
 
         return urlRequest
     }
 
     private func performDataRequest(
         _ urlRequest: URLRequest,
+        acceptedStatusCodes: HTTPStatusPolicy,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
@@ -337,15 +527,16 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
 
         try Task.checkCancellation()
         logger?.log(response: response, data: data)
+        try Task.checkCancellation()
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NetworkError.invalidResponse
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw NetworkError.requestFailed(
-                statusCode: httpResponse.statusCode,
+        guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+            throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                response: httpResponse,
                 data: data
-            )
+            ))
         }
 
         return (data, httpResponse)
@@ -357,6 +548,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         response: HTTPURLResponse,
         configuration: Configuration
     ) throws -> HTTPResponse<R.ReturnType> {
+        try Task.checkCancellation()
         let value: R.ReturnType
         do {
             value = try decode(
@@ -372,6 +564,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         } catch {
             throw NetworkError.decodingFailed(error)
         }
+        try Task.checkCancellation()
 
         return HTTPResponse(
             value: value,
@@ -383,7 +576,7 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
     private static func throwTransportError(
         _ error: any Error
     ) throws -> Never {
-        if error is CancellationError {
+        if Task.isCancelled || error is CancellationError {
             throw CancellationError()
         }
         if let urlError = error as? URLError {
@@ -393,6 +586,16 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
             throw NetworkError.transport(urlError)
         }
         throw NetworkError.unknown(error)
+    }
+
+    private static func makeHTTPFailure(
+        response: HTTPURLResponse,
+        data: Data?
+    ) -> HTTPFailure {
+        HTTPFailure(
+            metadata: HTTPResponseMetadata(response),
+            data: data
+        )
     }
 
     private static func validateDownloadDestination(
@@ -492,6 +695,12 @@ public final class APIClient: APIClientTransferProtocol, Sendable {
         return try? Data(contentsOf: url)
     }
 
+    private func discardDownloadedFile(at url: URL) async {
+        await fileIOExecutor.runCleanup {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     private static func decode<R: Request>(
         _ request: R,
         data: Data,
@@ -555,6 +764,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     var headers: [String: String]? { wrapped.headers }
     var body: Data? { wrapped.body }
     var queryItems: [URLQueryItem]? { wrapped.queryItems }
+    var acceptedStatusCodes: HTTPStatusPolicy { wrapped.acceptedStatusCodes }
     var allowsEmptyResponseBody: Bool { wrapped.allowsEmptyResponseBody }
 
     func makeURL(baseURL: URL) -> URL? {
@@ -599,25 +809,5 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
         using decoder: JSONDecoder
     ) throws -> PaginatedResponse<Inner.ReturnType> {
         try wrapped.decodePage(data, response: response, using: decoder)
-    }
-}
-
-// MARK: - Locking
-
-private final class Locked<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-
-    init(_ value: Value) {
-        self.value = value
-    }
-
-    @discardableResult
-    func withLock<Result>(
-        _ operation: (inout Value) throws -> Result
-    ) rethrows -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return try operation(&value)
     }
 }

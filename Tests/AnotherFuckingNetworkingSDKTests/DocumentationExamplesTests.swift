@@ -149,6 +149,30 @@ struct DocumentationExamplesTests {
         ).statusCode == 200)
     }
 
+    @Test("Request-specific status policy examples compile")
+    func statusPolicies() async throws {
+        let body = Data(#"{"id":42,"displayName":"Existing"}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 409,
+                data: body
+            ))
+        }
+        let client: any APIClientResponseProtocol = stub.client()
+
+        let response = try await client.sendResponse(
+            DocumentationCreateOrReturnUserRequest()
+        )
+
+        #expect(response.statusCode == 409)
+        #expect(response.value == DocumentationUser(
+            id: 42,
+            displayName: "Existing"
+        ))
+        #expect(HTTPStatusPolicy(200...299, 304...304).accepts(304))
+    }
+
     @Test("Upload and download examples compile through the transfer protocol")
     func fileTransfers() async throws {
         let stub = StubSession { request in
@@ -177,6 +201,175 @@ struct DocumentationExamplesTests {
         #expect(upload.value == DocumentationUser(id: 42, displayName: "Arthur"))
         #expect(try Data(contentsOf: download.fileURL) == Data("export".utf8))
     }
+
+    @Test("Transfer mocks compile through the transfer protocol without files")
+    func transferMocking() async throws {
+        let mock = MockAPIClient()
+        let client: any APIClientTransferProtocol = mock
+        let uniqueComponent = UUID().uuidString
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-upload-\(uniqueComponent).jpg")
+        let downloadDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mock-downloads-\(uniqueComponent)")
+        let expectedUser = DocumentationUser(
+            id: 42,
+            displayName: "Arthur"
+        )
+
+        await mock.stubUpload(
+            DocumentationUploadAvatarRequest.self,
+            with: HTTPResponse(
+                value: expectedUser,
+                metadata: HTTPResponseMetadata(statusCode: 201)
+            )
+        )
+        await mock.stubDownload(
+            DocumentationExportRequest.self,
+            using: { transfer in
+                DownloadResponse(
+                    fileURL: downloadDirectory.appendingPathComponent(
+                        String(transfer.sequenceID)
+                    ),
+                    metadata: HTTPResponseMetadata(statusCode: 200)
+                )
+            }
+        )
+
+        let upload = try await client.upload(
+            DocumentationUploadAvatarRequest(userID: 42),
+            from: .file(sourceURL)
+        )
+        let firstDownload = try await client.download(
+            DocumentationExportRequest(exportID: "latest")
+        )
+        let secondDownload = try await client.download(
+            DocumentationExportRequest(exportID: "latest")
+        )
+        let transfers = await mock.recordedTransfers
+
+        #expect(upload.value == expectedUser)
+        #expect(firstDownload.fileURL != secondDownload.fileURL)
+        #expect(transfers.map(\.path) == [
+            "users/42/avatar",
+            "exports/latest",
+            "exports/latest"
+        ])
+        #expect(transfers.map(\.operation) == [
+            .upload(.file(sourceURL)),
+            .download(.temporary),
+            .download(.temporary)
+        ])
+    }
+
+    @Test("Multipart upload examples compile through the public API")
+    func multipartUpload() async throws {
+        let capturedRequest = LockedBox<URLRequest?>(nil)
+        let stub = StubSession { request in
+            capturedRequest.withLock { $0 = request }
+            return .respond(try .http(
+                for: request,
+                data: Data(#"{"id":42,"displayName":"Arthur"}"#.utf8)
+            ))
+        }
+        let client: any APIClientTransferProtocol = stub.client()
+
+        var form = try MultipartFormData(boundary: "documentation-boundary")
+        try form.append("Arthur Dent", name: "displayName")
+        try form.append(
+            Data([0xFF, 0xD8, 0xFF]),
+            name: "avatar",
+            filename: "avatar.jpg",
+            contentType: "image/jpeg"
+        )
+        let encodedBody = try form.encode()
+
+        let response = try await client.upload(
+            DocumentationUploadProfileRequest(
+                userID: 42,
+                contentType: form.contentType
+            ),
+            from: .data(encodedBody)
+        )
+
+        let request = try #require(capturedRequest.withLock { $0 })
+        #expect(
+            request.value(forHTTPHeaderField: "Content-Type") == form.contentType
+        )
+        #expect(requestBodyData(request) == encodedBody)
+        #expect(
+            response.value == DocumentationUser(id: 42, displayName: "Arthur")
+        )
+    }
+
+    @Test("WebSocket examples compile and run through protocol existentials")
+    func webSockets() async throws {
+        let bufferingPolicy = WebSocketInboundBufferingPolicy(
+            maximumMessages: 64,
+            maximumBytes: 8 * 1_024 * 1_024
+        )
+        let mockConnection = try MockWebSocketConnection(
+            url: URL(string: "wss://example.com/rooms/lobby/socket")!,
+            negotiatedSubprotocol: "chat.v1",
+            inboundBufferingPolicy: bufferingPolicy,
+            incoming: [
+                .success(.text("welcome")),
+                .success(.binary(Data([0x01, 0x02])))
+            ]
+        )
+        let mockClient = MockWebSocketClient(
+            baseURL: URL(string: "https://example.com")
+        )
+        await mockClient.stub(
+            DocumentationChatSocket.self,
+            with: mockConnection
+        )
+        let client: any WebSocketClientProtocol = mockClient
+        let connection = try await client.connect(
+            DocumentationChatSocket(roomID: "lobby")
+        )
+        var stateIterator = connection.states.makeAsyncIterator()
+
+        #expect(await stateIterator.next() == .open)
+
+        try await connection.send(text: "hello")
+        let firstMessage = try await connection.receive()
+
+        var streamedMessages: [WebSocketMessage] = []
+        for try await message in connection.messages {
+            streamedMessages.append(message)
+            break
+        }
+
+        try await connection.ping()
+        try await connection.close(code: .normalClosure, reason: "Done")
+        #expect(await stateIterator.next() == .closing)
+        await mockConnection.finish()
+        #expect(await stateIterator.next() == .closed(WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        )))
+        #expect(await stateIterator.next() == nil)
+
+        #expect(connection.url == URL(string: "wss://example.com/rooms/lobby/socket"))
+        #expect(connection.negotiatedSubprotocol == "chat.v1")
+        #expect(firstMessage == .text("welcome"))
+        #expect(streamedMessages == [.binary(Data([0x01, 0x02]))])
+        #expect(await mockConnection.sentMessages == [.text("hello")])
+        #expect(await mockConnection.pingCount == 1)
+        #expect(await mockConnection.closeDetails == WebSocketClose(
+            code: .normalClosure,
+            reason: Data("Done".utf8)
+        ))
+        #expect(mockConnection.inboundBufferingPolicy == bufferingPolicy)
+        #expect(await mockConnection.bufferedMessageCount == 0)
+        #expect(await mockConnection.bufferedByteCount == 0)
+        #expect(await mockClient.recordedRequests.map(
+            \.inboundBufferingPolicy
+        ) == [bufferingPolicy])
+        #expect(await mockClient.recordedRequests.map(\.path) == [
+            "rooms/lobby/socket"
+        ])
+    }
 }
 
 private func documentationMessage(for error: NetworkError) -> String {
@@ -191,8 +384,8 @@ private func documentationMessage(for error: NetworkError) -> String {
         return "Request configuration failed"
     case .transport:
         return "Transport failed"
-    case .requestFailed(let statusCode, _):
-        return "HTTP \(statusCode)"
+    case .requestFailed(let failure):
+        return "HTTP \(failure.statusCode)"
     case .emptyResponse(let statusCode):
         return "Empty HTTP \(statusCode)"
     case .decodingFailed:
@@ -235,6 +428,14 @@ private struct DocumentationCreateUserRequest: Request {
     }
 }
 
+private struct DocumentationCreateOrReturnUserRequest: Request {
+    typealias ReturnType = DocumentationUser
+
+    let path = "users"
+    let method = HTTPMethod.post
+    let acceptedStatusCodes = HTTPStatusPolicy(200...299, 409...409)
+}
+
 private struct DocumentationListUsersRequest: PaginatedRequest {
     typealias ReturnType = DocumentationUser
 
@@ -273,6 +474,19 @@ private struct DocumentationUploadAvatarRequest: Request {
     let headers: [String: String]? = ["Content-Type": "image/jpeg"]
 }
 
+private struct DocumentationUploadProfileRequest: Request {
+    typealias ReturnType = DocumentationUser
+
+    let userID: Int
+    let contentType: String
+
+    var path: String { "users/\(userID)/profile" }
+    let method = HTTPMethod.post
+    var headers: [String: String]? {
+        ["Content-Type": contentType]
+    }
+}
+
 private struct DocumentationExportRequest: DownloadRequest {
     let exportID: String
     var path: String { "exports/\(exportID)" }
@@ -283,5 +497,22 @@ private struct DocumentationUserService: Sendable {
 
     func user(id: Int) async throws -> DocumentationUser {
         try await client.send(DocumentationGetUserRequest(userID: id))
+    }
+}
+
+private struct DocumentationChatSocket: WebSocketRequest {
+    let roomID: String
+
+    var path: String { "rooms/\(roomID)/socket" }
+    var queryItems: [URLQueryItem]? {
+        [URLQueryItem(name: "history", value: "10")]
+    }
+    var headers: [String: String]? {
+        ["Authorization": "Bearer TOKEN"]
+    }
+    var subprotocols: [String] { ["chat.v1"] }
+    var maximumMessageSize: Int? { 1_048_576 }
+    var inboundBufferingPolicy: WebSocketInboundBufferingPolicy {
+        .init(maximumMessages: 64, maximumBytes: 8 * 1_024 * 1_024)
     }
 }
