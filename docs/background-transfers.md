@@ -56,7 +56,40 @@ adapter.setBackgroundEventsCompletionHandler {
     applicationCompletionHandler()
 }
 
-let task = adapter.download(requestURLRequest, resumeData: job.resumeData)
+let task = adapter.download(
+    requestURLRequest,
+    resumeData: job.resumeData,
+    jobID: job.id
+)
+```
+
+Passing `jobID` stores a namespaced, opaque task description. On relaunch,
+reconcile Foundation's still-running tasks with the durable job index before
+handling delegate events:
+
+```swift
+for task in await adapter.transferTasks() {
+    guard let jobID = task.jobID else { continue }
+    // Bind task.taskIdentifier to jobID in the app-owned event router.
+}
+```
+
+`BackgroundTransferEvent.taskIdentifier` is available on every task-scoped
+event, while `backgroundEventsFinished` has no task identifier. This makes it
+possible to route progress, metrics, temporary files, and completion events
+after process termination without persisting requests or credentials.
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Store as TransferJobStore
+    participant Session as Background URLSession
+    App->>Store: restore jobs
+    App->>Session: transferTasks()
+    Session-->>App: taskIdentifier + jobID descriptors
+    App->>App: bind identifiers to jobs
+    Session-->>App: BackgroundTransferEvent
+    App->>Store: persist checkpoint or terminal state
 ```
 
 The delegate emits bounded progress, temporary download locations, completion
