@@ -398,6 +398,34 @@ struct WebSocketRequestBuilderTests {
 
 @Suite("APIClient WebSocket integration")
 struct APIClientWebSocketTests {
+    @Test("WebSocket telemetry forwards task metrics after the handshake")
+    func telemetryForwardsTaskMetrics() async throws {
+        let events = LockedBox<[NetworkTelemetryEvent]>([])
+        let transport = FakeWebSocketTransport()
+        let client = APIClient(
+            baseURL: URL(string: "https://example.com"),
+            telemetry: NetworkTelemetry { event in
+                events.withLock { $0.append(event) }
+            },
+            webSocketTransportFactory: { _, _, _ in transport }
+        )
+
+        _ = try await client.connect(WebSocketFixtureRequest())
+        let snapshot = NetworkTaskMetricsSnapshot(
+            fetchStart: Date(timeIntervalSince1970: 1),
+            responseEnd: Date(timeIntervalSince1970: 2),
+            requestDurationNanoseconds: 1_000
+        )
+        transport.emitTaskMetrics(snapshot)
+
+        let matching = events.withLock {
+            $0.filter { $0.phase == .taskMetrics }
+        }
+        #expect(matching.count == 1)
+        #expect(matching.first?.kind == .webSocketHandshake)
+        #expect(matching.first?.taskMetrics == snapshot)
+    }
+
     @Test("Connect builds the handshake and waits for transport open")
     func connectRequestAndOpen() async throws {
         let bufferingPolicy = WebSocketInboundBufferingPolicy(
@@ -579,6 +607,27 @@ struct APIClientWebSocketTests {
 
 @Suite("URLSession WebSocket transport")
 struct URLSessionWebSocketTransportTests {
+    @Test("WebSocket task metrics are forwarded without transport state changes")
+    func taskMetricsAreForwarded() {
+        let adapter = FakeWebSocketTaskAdapter()
+        let transport = URLSessionWebSocketTransport(adapter: adapter)
+        let snapshots = LockedBox<[NetworkTaskMetricsSnapshot]>([])
+        transport.setTaskMetricsHandler { snapshot in
+            snapshots.withLock { $0.append(snapshot) }
+        }
+        let snapshot = NetworkTaskMetricsSnapshot(
+            fetchStart: Date(timeIntervalSince1970: 1),
+            responseEnd: Date(timeIntervalSince1970: 2),
+            requestDurationNanoseconds: 1_000
+        )
+
+        adapter.emit(.metrics(snapshot))
+
+        #expect(snapshots.withLock { $0 } == [snapshot])
+        if case .closed = transport.status() {
+            Issue.record("Metrics must not close the WebSocket transport")
+        }
+    }
     @Test("Open returns the negotiated protocol and tracks peer closure")
     func openAndCloseLifecycle() async throws {
         let adapter = FakeWebSocketTaskAdapter(
@@ -1865,6 +1914,7 @@ private final class FakeWebSocketTaskAdapter: WebSocketTaskAdapter,
 }
 
 private final class FakeWebSocketTransport: WebSocketTransport,
+    WebSocketTaskMetricsReporting,
     @unchecked Sendable {
     struct CloseRecord: Sendable {
         let code: WebSocketCloseCode
@@ -1898,6 +1948,9 @@ private final class FakeWebSocketTransport: WebSocketTransport,
         var pingCount = 0
         var closes: [CloseRecord] = []
         var cancelCount = 0
+        var taskMetricsHandler: (
+            @Sendable (NetworkTaskMetricsSnapshot) -> Void
+        )?
     }
 
     let openStarted = AsyncSignal()
@@ -1917,7 +1970,8 @@ private final class FakeWebSocketTransport: WebSocketTransport,
             openResult: openResult,
             sendResults: sendResults,
             receiveResults: receiveResults,
-            pingResults: pingResults
+            pingResults: pingResults,
+            taskMetricsHandler: nil
         ))
     }
 
@@ -2015,6 +2069,17 @@ private final class FakeWebSocketTransport: WebSocketTransport,
 
     func status() -> WebSocketTransportStatus {
         state.withLock { $0.status }
+    }
+
+    func setTaskMetricsHandler(
+        _ handler: @escaping @Sendable (NetworkTaskMetricsSnapshot) -> Void
+    ) {
+        state.withLock { $0.taskMetricsHandler = handler }
+    }
+
+    func emitTaskMetrics(_ snapshot: NetworkTaskMetricsSnapshot) {
+        let handler = state.withLock { $0.taskMetricsHandler }
+        handler?(snapshot)
     }
 
     func setStatus(_ status: WebSocketTransportStatus) {

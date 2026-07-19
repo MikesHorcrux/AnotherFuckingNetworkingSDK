@@ -23,6 +23,8 @@ roadmap item is not a shipped feature.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Transfer delegate task-metrics telemetry with privacy-safe snapshots.
+- WebSocket task-metrics telemetry wired through the injected URLSession
+  delegate path.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
 - Opt-in WebSocket reconnect, bounded backoff, heartbeat, and contextual
@@ -38,9 +40,8 @@ roadmap item is not a shipped feature.
    `BackgroundURLSessionAdapter` on each supported Apple platform. The SDK now
    exposes stable task descriptors and an actor-isolated event router; device
    coverage and terminal commit policy remain.
-2. **Platform task-metrics integration** — wire the shipped snapshot into any
-   remaining platform delegate operations and oldest-target coverage where the
-   platform exposes metrics.
+2. **Platform task-metrics integration** — oldest-target and device coverage
+   remain for the shipped HTTP, transfer, and WebSocket delegate integrations.
 3. **Streaming multipart integration** — broader upload retry, signing, and
    oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery

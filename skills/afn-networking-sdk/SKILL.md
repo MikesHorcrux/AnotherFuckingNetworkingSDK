@@ -60,7 +60,8 @@ source and tests before relying on any example below.
   `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters
   lightweight and vendor-neutral. Transfer delegates emit separate
   `taskMetrics` events through the snapshot initializer without retaining URL
-  or payload data, even when progress callbacks are disabled.
+  or payload data, even when progress callbacks are disabled. WebSocket task
+  delegates use the same path after the upgrade handshake.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
 - Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and

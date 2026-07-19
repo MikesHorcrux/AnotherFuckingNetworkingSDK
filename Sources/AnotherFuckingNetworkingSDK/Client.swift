@@ -429,10 +429,16 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             let connection: any WebSocketConnectionProtocol
             if let activityMonitor {
                 connection = try await activityMonitor.track(.webSocketHandshake) {
-                    try await self.connectWithoutMonitoring(request)
+                    try await self.connectWithoutMonitoring(
+                        request,
+                        telemetry: telemetryContext
+                    )
                 }
             } else {
-                connection = try await connectWithoutMonitoring(request)
+                connection = try await connectWithoutMonitoring(
+                    request,
+                    telemetry: telemetryContext
+                )
             }
             finishTelemetry(telemetryContext)
             return connection
@@ -443,7 +449,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
     }
 
     private func connectWithoutMonitoring<R: WebSocketRequest>(
-        _ request: R
+        _ request: R,
+        telemetry: NetworkTelemetryContext?
     ) async throws -> any WebSocketConnectionProtocol {
         try Task.checkCancellation()
         let configuration = state.withCriticalRegion { $0 }
@@ -464,6 +471,17 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             urlRequest,
             preparedRequest.transportConfiguration
         )
+        if let telemetry,
+           let metricsTransport = transport
+                as? any WebSocketTaskMetricsReporting {
+            metricsTransport.setTaskMetricsHandler { snapshot in
+                telemetry.emit(
+                    phase: .taskMetrics,
+                    attempt: 1,
+                    taskMetrics: snapshot
+                )
+            }
+        }
 
         do {
             let negotiatedSubprotocol = try await transport.open()

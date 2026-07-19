@@ -77,6 +77,8 @@ Policies are values or wrappers, not hidden global switches:
 - `NetworkActivityMonitor` and `NetworkingLogger` are opt-in observers.
 - `NetworkTelemetry` emits privacy-safe operation and attempt events without
   coupling the core to a metrics vendor.
+- Foundation WebSocket task delegates forward timing-only metrics through the
+  same telemetry context after the upgrade handshake.
 - `CachedAPIClient` and `ConditionalCachedAPIClient` provide bounded,
   caller-keyed response reuse; the conditional decorator owns validator
   revalidation without imposing cache semantics on the base client.
