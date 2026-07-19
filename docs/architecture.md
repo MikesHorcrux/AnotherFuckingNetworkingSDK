@@ -105,6 +105,9 @@ Policies are values or wrappers, not hidden global switches:
 - ServerSentEventStream is a bounded framing adapter over HTTPByteStream;
   status/retry decisions stay in the HTTP layer while event parsing remains
   single-pass and cancellation-owned by the consumer.
+- JSONLinesStream<Value> is the typed sibling for newline-delimited JSON;
+  each record is bounded and decoded independently without changing the HTTP
+  transport's ownership or retry semantics.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.
 - ObservableNetworkPath is a main-actor presentation adapter over those

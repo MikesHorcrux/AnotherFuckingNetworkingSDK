@@ -280,11 +280,22 @@ for try await event in events {
 ~~~
 
 The parser handles UTF-8 fields, CRLF/LF framing, multiline `data:` values,
-and bounded `retry:` metadata without accumulating the response body. NDJSON
-and other line-oriented formats can use the same byte sequence with a small
-application adapter. Services that need this capability can depend on
-`any APIClientStreamingProtocol`. See
-[Server-Sent Events](docs/server-sent-events.md) for cancellation and limits.
+and bounded `retry:` metadata without accumulating the response body. For
+typed NDJSON, use the matching `streamJSONLines` convenience:
+
+~~~swift
+let records = try await client.streamJSONLines(
+    EventRequest(),
+    as: EventRecord.self
+)
+for try await record in records {
+    apply(record)
+}
+~~~
+
+Services that need this capability can depend on
+`any APIClientStreamingProtocol`. See [Server-Sent Events](docs/server-sent-events.md)
+and [JSON Lines](docs/json-lines.md) for cancellation and limits.
 
 ## Request-specific status policies
 
