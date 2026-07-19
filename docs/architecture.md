@@ -30,7 +30,7 @@ flowchart LR
     Test["Testing product\nMockAPIClient / fixtures"]
     Background["BackgroundURLSessionAdapter\ndelegate + resume events"]
     Telemetry["Telemetry policy\nmetrics / exporter bridge"]
-    Network["Planned network product\nNWPathMonitor helpers"]
+    Network["Optional network path observation\nNWPathMonitor snapshots"]
     Test --> Core
     Background --> Core
     Telemetry --> Core
@@ -85,6 +85,8 @@ Policies are values or wrappers, not hidden global switches:
 - `BackgroundURLSessionAdapter` translates platform delegate callbacks while
   `TransferJobCoordinator` remains the durable state owner.
 - WebSocket buffering and lifecycle policies are captured at connection open.
+- NetworkPathMonitor is an opt-in newest-only observer; it never blocks
+  requests or substitutes for URLSession connectivity policy.
 
 This keeps the default client fast and avoids forcing cache, telemetry,
 reachability, or authentication onto applications that do not need them.

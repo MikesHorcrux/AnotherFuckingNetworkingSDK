@@ -32,6 +32,8 @@ roadmap item is not a shipped feature.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.
+- Optional NetworkPathMonitor snapshots for connectivity-aware UI and policy;
+  transport requests remain non-blocking.
 
 ## Next production modules
 
@@ -60,4 +62,4 @@ roadmap item is not a shipped feature.
 - A mandatory offline queue or global cache.
 - GraphQL, gRPC, or product-specific authentication in the core target.
 - Reachability preflight that blocks every request; use URLSession connectivity
-  policies and optional path observation instead.
+  policies and the optional path observer instead.

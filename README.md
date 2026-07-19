@@ -561,6 +561,12 @@ remain application policy. Pass a durable job ID when creating a task and use
 rebuild task-to-job routing. See
 [Background and resumable transfers](docs/background-transfers.md).
 
+## Connectivity observation
+
+NetworkPathMonitor provides optional newest-only connectivity snapshots for UI
+and policy selection. It never blocks requests; configure URLSession's
+connectivity behavior separately.
+
 ## WebSockets
 
 `APIClient` opens WebSockets with the same base URL, global headers, cookies, authentication handling, and `URLSession` as ordinary requests. An `https` base URL becomes `wss`; `http` becomes `ws`.
