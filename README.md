@@ -567,6 +567,10 @@ NetworkPathMonitor provides optional newest-only connectivity snapshots for UI
 and policy selection. It never blocks requests; configure URLSession's
 connectivity behavior separately.
 
+On Observation-capable OS versions, `ObservableNetworkPath` mirrors the same
+snapshots into main-actor presentation state without moving monitoring or
+transport work onto the UI executor.
+
 ## WebSockets
 
 `APIClient` opens WebSockets with the same base URL, global headers, cookies, authentication handling, and `URLSession` as ordinary requests. An `https` base URL becomes `wss`; `http` becomes `ws`.

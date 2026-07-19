@@ -57,7 +57,8 @@ source and tests before relying on any example below.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Connectivity: `NetworkPathMonitor` provides newest-only path snapshots for
-  UI or policy selection; never add a reachability preflight that blocks a
+  UI or policy selection; `ObservableNetworkPath` is the iOS 17+/macOS 14+
+  Observation adapter; never add a reachability preflight that blocks a
   request.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
   `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters

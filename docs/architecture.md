@@ -87,6 +87,8 @@ Policies are values or wrappers, not hidden global switches:
 - WebSocket buffering and lifecycle policies are captured at connection open.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.
+- ObservableNetworkPath is a main-actor presentation adapter over those
+  snapshots; path callbacks and transport work remain off the UI executor.
 
 This keeps the default client fast and avoids forcing cache, telemetry,
 reachability, or authentication onto applications that do not need them.
