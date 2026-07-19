@@ -46,12 +46,14 @@ source and tests before relying on any example below.
   known file/multipart lengths are exposed through `Content-Length` before
   `customize(_:)` for body-free signing.
 - Background transfer state: `TransferJob`, `TransferJobStore`,
-  `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
-  resolution, authentication, destination commits, and relaunch routing in
-  the application layer. Use actor-isolated `recordCheckpoint`, `pause`,
-  `recordFailure`, and `commitSuccess` for routed callbacks. The Foundation
-  background adapter is iOS/macOS-only; pair the durable coordinator with
-  platform-owned transports on tvOS, watchOS, and visionOS.
+  `TransferJobCoordinator`, `BackgroundURLSessionAdapter`, and
+  `BackgroundTransferLifecycleCoordinator`; keep request resolution,
+  authentication, and destination commits in application policy. Reconcile
+  task IDs with `BackgroundTransferEventRouter`, then use the lifecycle actor
+  to start restored jobs, checkpoint progress, commit downloads, and record
+  failures. The Foundation background adapter is iOS/macOS-only; pair the
+  durable coordinator with platform-owned transports on tvOS, watchOS, and
+  visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
@@ -93,6 +95,8 @@ source and tests before relying on any example below.
 - File cleanup is ownership-aware and must run even when the awaiting task is
   cancelled.
 - Observation/activity streams are newest-only and privacy-safe.
+- Background callbacks are actor-serialized; never mark a download succeeded
+  before the application-owned temporary-file commit returns.
 
 ## Change-specific guidance
 
@@ -117,8 +121,10 @@ resume data, and relaunch recovery belong in a lifecycle-bound module. Use
 `TransferJobCoordinator` as the single durable state writer; pass `jobID` when
 creating background tasks and reconcile `transferTasks()` after relaunch so
 task identifiers route back to durable jobs. Use `BackgroundTransferEventRouter`
-for actor-isolated collision checks and event routing. Do not pretend a
-foreground convenience task is durable.
+for actor-isolated collision checks and `BackgroundTransferLifecycleCoordinator`
+to apply callbacks. Supply an explicit destination committer and do not mark
+success until it completes. Do not pretend a foreground convenience task is
+durable.
 
 ### WebSockets and Observation
 

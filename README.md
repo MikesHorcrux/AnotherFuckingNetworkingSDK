@@ -564,6 +564,49 @@ remain application policy. Pass a durable job ID when creating a task and use
 rebuild task-to-job routing. See
 [Background and resumable transfers](docs/background-transfers.md).
 
+For a single durable callback path, compose the router and coordinator with
+`BackgroundTransferLifecycleCoordinator`. It starts restored jobs when the
+first delegate callback arrives, persists monotonic progress, and refuses to
+mark a download successful until your destination policy has committed the
+temporary file:
+
+```swift
+let lifecycle = BackgroundTransferLifecycleCoordinator(
+    router: backgroundRouter,
+    coordinator: coordinator,
+    commitDownload: { route, temporaryURL, destinationURL in
+        guard let destinationURL else {
+            throw BackgroundTransferLifecycleError.missingDownloadDestination(
+                route.jobID
+            )
+        }
+        try FileManager.default.moveItem(
+            at: temporaryURL,
+            to: destinationURL
+        )
+        return destinationURL
+    },
+    metricsHandler: { route, snapshot in
+        metricsStore.record(route: route, snapshot: snapshot)
+    }
+)
+
+let adapter = BackgroundURLSessionAdapter(
+    identifier: "com.example.exports",
+    eventHandler: { event in
+        Task {
+            try? await lifecycle.handle(event)
+        }
+    }
+)
+```
+
+The lifecycle actor ignores stale task identifiers, preserves bounded failure
+identity, and leaves route bindings intact for explicit application cleanup.
+Use a serial delegate queue or an application event queue when callback order
+is significant; do not perform expensive file work directly in Foundation's
+delegate callback.
+
 ## Connectivity observation
 
 NetworkPathMonitor provides optional newest-only connectivity snapshots for UI

@@ -22,6 +22,9 @@ roadmap item is not a shipped feature.
   reconciliation and typed post-relaunch event routing.
 - Actor-isolated coordinator checkpoint, pause, failure, and terminal-success
   primitives for app-owned background callbacks.
+- Actor-isolated `BackgroundTransferLifecycleCoordinator` that applies routed
+  Foundation callbacks, commits temporary downloads through an explicit file
+  policy, and preserves idempotent terminal transitions.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Known upload lengths are available to request customization before
   file-backed signing and replay, without materializing the body.
@@ -44,8 +47,9 @@ roadmap item is not a shipped feature.
 1. **Platform background/resumable integration** — device/relaunch coverage,
    resume-data validation, and coordinator routing for the shipped
    `BackgroundURLSessionAdapter` on each supported Apple platform. The SDK now
-   exposes stable task descriptors and an actor-isolated event router; device
-   coverage and terminal commit policy remain.
+   exposes stable task descriptors, an actor-isolated event router, and a
+   lifecycle coordinator with an explicit destination commit policy; device
+   coverage and platform terminal behavior remain.
 2. **Platform task-metrics integration** — oldest-target and device coverage
    remain for the shipped HTTP, transfer, and WebSocket delegate integrations.
 3. **Streaming multipart integration** — broader upload retry, signing, and

@@ -29,10 +29,13 @@ flowchart LR
     Core["Core product\nAPIClient / policies / streams"]
     Test["Testing product\nMockAPIClient / fixtures"]
     Background["BackgroundURLSessionAdapter\ndelegate + resume events"]
+    Lifecycle["BackgroundTransferLifecycleCoordinator\nrouted durable transitions"]
     Telemetry["Telemetry policy\nmetrics / exporter bridge"]
     Network["Optional network path observation\nNWPathMonitor snapshots"]
     Test --> Core
     Background --> Core
+    Lifecycle --> Background
+    Lifecycle --> Core
     Telemetry --> Core
     Network --> Core
 ```
@@ -84,6 +87,10 @@ Policies are values or wrappers, not hidden global switches:
   revalidation without imposing cache semantics on the base client.
 - `BackgroundURLSessionAdapter` translates platform delegate callbacks while
   `TransferJobCoordinator` remains the durable state owner.
+- `BackgroundTransferLifecycleCoordinator` composes the actor-isolated router
+  and durable coordinator. It starts relaunch-restored jobs, applies monotonic
+  progress, and invokes an application-owned destination commit before
+  terminal success.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 - NetworkPathMonitor is an opt-in newest-only observer; it never blocks
   requests or substitutes for URLSession connectivity policy.

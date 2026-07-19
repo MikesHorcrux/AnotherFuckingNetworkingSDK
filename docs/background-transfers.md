@@ -99,17 +99,73 @@ jobs. The router intentionally leaves file moves,
 resume-data validation, authentication, and terminal job commits to the
 application's `TransferJobCoordinator` policy.
 
+## Applying callbacks to durable jobs
+
+`BackgroundTransferLifecycleCoordinator` is the policy-composition seam for
+applications that want the SDK to apply the routine callback transitions. It
+is an actor over the router and `TransferJobCoordinator` and provides these
+guarantees:
+
+- the first progress or completion callback starts a queued/paused job exactly
+  once;
+- progress checkpoints carry the route's upload/download direction and the
+  restored attempt number;
+- a temporary download URL is retained only until its terminal callback;
+- `commitDownload` runs before `commitSuccess`, so a failed file move leaves
+  the durable job non-terminal; and
+- malformed callback error text becomes a bounded, privacy-safe domain/code
+  identity rather than a persisted response or credential.
+
+The application supplies the destination commit because it owns overwrite,
+file protection, and conflict policy:
+
+```swift
+let lifecycle = BackgroundTransferLifecycleCoordinator(
+    router: backgroundRouter,
+    coordinator: coordinator,
+    commitDownload: { route, temporaryURL, destinationURL in
+        guard let destinationURL else {
+            throw BackgroundTransferLifecycleError.missingDownloadDestination(
+                route.jobID
+            )
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+        return destinationURL
+    },
+    metricsHandler: { route, snapshot in
+        metricsStore.record(route: route, snapshot: snapshot)
+    }
+)
+
+let adapter = BackgroundURLSessionAdapter(
+    identifier: "com.example.exports",
+    eventHandler: { event in
+        Task { try? await lifecycle.handle(event) }
+    }
+)
+```
+
+The coordinator returns a `BackgroundTransferLifecycleOutcome` for progress,
+staged downloads, committed jobs, failures, metrics, and the session-wide
+completion event. Unknown task identifiers return `nil`, making stale callbacks
+from a replaced session harmless. Keep route bindings until the application
+has finished its own cleanup; the coordinator deliberately does not unbind
+them automatically so duplicate terminal callbacks remain idempotent.
+
 ```mermaid
 sequenceDiagram
     participant App
     participant Store as TransferJobStore
     participant Session as Background URLSession
+    participant Lifecycle as LifecycleCoordinator
     App->>Store: restore jobs
     App->>Session: transferTasks()
     Session-->>App: taskIdentifier + jobID descriptors
     App->>App: bind identifiers to jobs
     Session-->>App: BackgroundTransferEvent
-    App->>App: BackgroundTransferEventRouter.handle
+    App->>Lifecycle: handle(event)
+    Lifecycle->>Lifecycle: route + start + checkpoint
+    Lifecycle->>App: commitDownload(tempURL)
     App->>Store: persist checkpoint or terminal state
 ```
 
