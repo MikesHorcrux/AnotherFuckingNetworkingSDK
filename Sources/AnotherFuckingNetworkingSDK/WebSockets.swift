@@ -417,12 +417,14 @@ package enum WebSocketRequestBuilder {
     package static func make<R: WebSocketRequest>(
         _ request: R,
         baseURL: URL?,
-        globalHeaders: [String: String]
+        globalHeaders: [String: String],
+        requestCustomizer: APIClient.RequestCustomizer? = nil
     ) throws -> URLRequest {
         try prepare(
             request,
             baseURL: baseURL,
-            globalHeaders: globalHeaders
+            globalHeaders: globalHeaders,
+            requestCustomizer: requestCustomizer
         ).urlRequest
     }
 
@@ -432,7 +434,8 @@ package enum WebSocketRequestBuilder {
     package static func prepare<R: WebSocketRequest>(
         _ request: R,
         baseURL: URL?,
-        globalHeaders: [String: String]
+        globalHeaders: [String: String],
+        requestCustomizer: APIClient.RequestCustomizer? = nil
     ) throws -> PreparedRequest {
         let options = RequestOptions(
             headers: request.headers,
@@ -483,6 +486,14 @@ package enum WebSocketRequestBuilder {
 
         do {
             try request.customize(&urlRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw WebSocketError.requestConfigurationFailed(error)
+        }
+
+        do {
+            try requestCustomizer?(&urlRequest)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
