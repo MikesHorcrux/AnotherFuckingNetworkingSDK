@@ -1,7 +1,7 @@
 import Observation
 
 /// Main-actor Observation state for a WebSocket lifecycle sequence.
-@available(iOS 17.0, macOS 14.0, *)
+@available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
 @MainActor
 @Observable
 public final class ObservableWebSocketState {

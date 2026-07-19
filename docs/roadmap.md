@@ -39,8 +39,11 @@ roadmap item is not a shipped feature.
    oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
    adapters and oldest-target integration coverage.
-5. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
-   Catalyst evaluation.
+5. **Platform matrix** — package declarations and availability guards now cover
+   iOS, macOS, tvOS, watchOS, and visionOS, with Mac Catalyst builds in CI.
+   CI builds the additional platforms whenever the runner has their SDKs and
+   destinations installed; oldest-target and device/relaunch coverage remain
+   platform-specific follow-up work.
 
 ## Deliberate non-goals
 
