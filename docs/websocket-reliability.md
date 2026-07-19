@@ -59,6 +59,46 @@ cursor restoration explicit in a restorer closure. `restorerWithContext` is
 preferred when the server protocol needs the reconnect attempt or prior
 subprotocol as part of that decision.
 
+### Persisting protocol recovery state
+
+The reliability wrapper intentionally does not interpret cursors or session
+tokens. WebSocketRecoveryAdapter supplies a bounded, actor-isolated store
+while leaving the wire format to the application:
+
+~~~swift
+let recovery = try WebSocketRecoveryAdapter(
+    store: JSONWebSocketRecoveryStore(fileURL: recoveryURL),
+    key: "room-42"
+) { connection, context, state in
+    let cursor = state.map {
+        String(decoding: $0.payload, as: UTF8.self)
+    } ?? "none"
+    try await connection.send(text: "resume:" + cursor)
+    try await connection.send(
+        text: "attempt:" + String(context.attempt)
+    )
+}
+
+let reliable = WebSocketReliabilityClient(
+    client: client,
+    restorerWithContext: recovery.restorerWithContext
+)
+~~~
+
+Save new opaque state when the server acknowledges a cursor or session
+checkpoint:
+
+~~~swift
+try await recovery.save(
+    WebSocketRecoveryState(payload: Data("cursor-123".utf8))
+)
+~~~
+
+State is limited to 64 KiB per key. JSON writes are atomic and cached after the
+first read; use the in-memory store in tests. The SDK never logs, decodes, or
+replays the payload, and applications should encrypt or redact sensitive
+protocol state before persisting it.
+
 ## Backoff and heartbeats
 
 Reconnect attempts are bounded by `maximumReconnectAttempts`, capped by

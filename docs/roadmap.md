@@ -40,6 +40,8 @@ roadmap item is not a shipped feature.
   loopback fixtures.
 - Opt-in WebSocket reconnect, bounded backoff, heartbeat, and contextual
   session-restorer policies.
+- Bounded, actor-isolated WebSocket recovery state stores and a contextual
+  restorer adapter for application-defined cursors or session tokens.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.
@@ -59,10 +61,10 @@ roadmap item is not a shipped feature.
    remain for the shipped HTTP, transfer, and WebSocket delegate integrations.
 3. **Streaming multipart integration** — broader upload retry, signing, and
    oldest-target coverage for the shipped file-backed encoder.
-4. **WebSocket platform hardening** — server-specific cursor/session recovery
-   adapters and oldest-target integration coverage. The reliability wrapper
-   now supplies bounded reconnect context; protocol-specific cursor stores and
-   device integration remain app-owned.
+4. **WebSocket platform hardening** — server-specific wire framing and
+   oldest-target/device integration coverage. The reliability wrapper now
+   supplies bounded reconnect context and an app-owned recovery-state store;
+   protocol-specific cursor encoding and device integration remain app-owned.
 5. **Platform matrix** — package declarations and availability guards now cover
    iOS, macOS, tvOS, watchOS, and visionOS, with Mac Catalyst builds in CI.
    CI builds the additional platforms whenever the runner has their SDKs and

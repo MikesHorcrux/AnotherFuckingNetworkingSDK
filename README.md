@@ -759,6 +759,32 @@ bounded exponential backoff with jitter, and never replay a message that
 Foundation already accepted. See [WebSocket reliability](docs/websocket-reliability.md)
 for lifecycle, testing, and session-restoration guidance.
 
+For cursor- or session-aware protocols, persist only the opaque state your
+server defines and restore it after the replacement handshake:
+
+~~~swift
+let recovery = try WebSocketRecoveryAdapter(
+    store: JSONWebSocketRecoveryStore(fileURL: recoveryURL),
+    key: "lobby"
+) { connection, context, state in
+    let cursor = state.map {
+        String(decoding: $0.payload, as: UTF8.self)
+    } ?? "none"
+    try await connection.send(text: "resume:" + cursor)
+    print("reconnected attempt", context.attempt)
+}
+
+let reliableClient = WebSocketReliabilityClient(
+    client: client,
+    restorerWithContext: recovery.restorerWithContext
+)
+~~~
+
+WebSocketRecoveryState bounds each payload to 64 KiB. The in-memory and JSON
+stores are actor-isolated; the JSON store uses atomic writes and a lazy cache.
+The payload remains application-owned protocol data, so redact or encrypt it
+when it contains credentials or user-sensitive cursors.
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:

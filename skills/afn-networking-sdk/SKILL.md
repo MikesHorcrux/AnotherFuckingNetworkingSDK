@@ -60,6 +60,9 @@ source and tests before relying on any example below.
   coordinator with platform-owned transports on tvOS, watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
+- WebSocket recovery: WebSocketRecoveryAdapter provides bounded in-memory or
+  JSON cursor/session state for WebSocketReliabilityClient; keep its payload
+  opaque and application-owned.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
   buffering, lifecycle state, Observation adapters, and opt-in
   `WebSocketReliabilityClient` reconnect/heartbeat policies.
@@ -137,7 +140,9 @@ closed on overflow. Do not add automatic reconnect or heartbeat behavior to
 the base connection; use `WebSocketReliabilityClient` when bounded retry and
 session restoration are explicitly desired. Prefer `restorerWithContext` when
 a server cursor or session token needs the reconnect attempt and prior
-subprotocol. See
+subprotocol. Use WebSocketRecoveryAdapter when that opaque state must survive
+process termination; persist only bounded, redacted/encrypted data and never
+assume the SDK can decode a product protocol. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
 
 ### Request coalescing
