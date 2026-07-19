@@ -596,6 +596,10 @@ public protocol HTTPRequest: Sendable {
     /// The failed-attempt replay policy. The default is ``HTTPRetryPolicy/never``.
     var retryPolicy: HTTPRetryPolicy { get }
 
+    /// Controls whether an expired-credential request may be replayed after
+    /// a 401 response. The default permits only idempotent HTTP methods.
+    var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -618,6 +622,9 @@ public extension HTTPRequest {
     var headers: [String: String]? { nil }
     var acceptedStatusCodes: HTTPStatusPolicy { .successful }
     var retryPolicy: HTTPRetryPolicy { .never }
+    var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
+        .idempotentMethodsOnly
+    }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {

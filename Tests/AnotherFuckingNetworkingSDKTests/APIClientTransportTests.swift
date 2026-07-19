@@ -101,6 +101,70 @@ struct APIClientTransportTests {
         #expect(response.data == body)
     }
 
+    @Test("HTTP byte streams expose metadata before body bytes")
+    func byteStream() async throws {
+        let body = Data([0x00, 0x01, 0xFE, 0xFF])
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 200,
+                headers: ["Content-Type": "application/octet-stream"],
+                data: body
+            ))
+        }
+
+        let stream = try await stub.client().stream(GetUserRequest(id: 42))
+        #expect(stream.statusCode == 200)
+        #expect(stream.value(forHTTPHeaderField: "content-type") == "application/octet-stream")
+
+        var received = Data()
+        for try await byte in stream {
+            received.append(byte)
+        }
+        #expect(received == body)
+    }
+
+    @Test("Rejected byte streams preserve bounded failure data")
+    func byteStreamFailure() async throws {
+        let body = Data("stream failure".utf8)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 429,
+                headers: ["Retry-After": "0"],
+                data: body
+            ))
+        }
+
+        do {
+            _ = try await stub.client().stream(GetUserRequest(id: 42))
+            Issue.record("Expected requestFailed")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.statusCode == 429)
+            #expect(failure.data == body)
+        }
+    }
+
+    @Test("Streaming activity remains active until EOF")
+    func byteStreamActivityLifecycle() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("streamed".utf8)))
+        }
+        let monitor = NetworkActivityMonitor()
+        let stream = try await stub.client(activityMonitor: monitor).stream(
+            GetUserRequest(id: 42)
+        )
+
+        #expect(monitor.currentSnapshot.activeCount(for: .stream) == 1)
+        for try await _ in stream {}
+        #expect(monitor.currentSnapshot.activeCount(for: .stream) == 0)
+        #expect(monitor.currentSnapshot.succeededCount == 1)
+    }
+
     @Test("Raw requests accept empty successful bodies", arguments: [200, 204, 205])
     func emptyRawData(statusCode: Int) async throws {
         let stub = StubSession { request in

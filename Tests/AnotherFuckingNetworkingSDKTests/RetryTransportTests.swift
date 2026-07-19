@@ -72,6 +72,43 @@ struct RetryTransportTests {
         #expect(snapshot.revision == 2)
     }
 
+    @Test("HTTP byte streams retry before exposing response bytes")
+    func byteStreamRetriesBeforeExposure() async throws {
+        let calls = LockedBox(0)
+        let stub = StubSession { request in
+            let attempt = calls.withLock { calls in
+                calls += 1
+                return calls
+            }
+            if attempt == 1 {
+                return .respond(try .http(
+                    for: request,
+                    statusCode: 503,
+                    data: Data("temporary".utf8)
+                ))
+            }
+            return .respond(try .http(
+                for: request,
+                data: Data("streamed".utf8)
+            ))
+        }
+        let client = stub.client(retrySleeper: { _ in })
+        let request = RetryUserRequest(retryPolicy: .transient(
+            maximumAttempts: 2,
+            initialDelay: 0,
+            jitter: .none
+        ))
+
+        let stream = try await client.stream(request)
+        var received = Data()
+        for try await byte in stream {
+            received.append(byte)
+        }
+
+        #expect(received == Data("streamed".utf8))
+        #expect(calls.withLock { $0 } == 2)
+    }
+
     @Test("Pagination forwards retry policy across transport failures")
     func paginatedTransportRetry() async throws {
         let calls = LockedBox(0)

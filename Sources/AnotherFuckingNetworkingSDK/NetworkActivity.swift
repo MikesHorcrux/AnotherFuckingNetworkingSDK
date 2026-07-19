@@ -1,10 +1,17 @@
 import Foundation
 
+enum NetworkActivityOutcome: Sendable {
+    case succeeded
+    case failed
+    case cancelled
+}
+
 /// The kind of work represented by a network activity snapshot.
 public enum NetworkOperationKind: String, CaseIterable, Hashable, Sendable {
     case request
     case upload
     case download
+    case stream
     case webSocketHandshake
 }
 
@@ -101,12 +108,6 @@ public final class NetworkActivityMonitor: Sendable {
                 subscribers[id] = nil
             }
         }
-    }
-
-    private enum Outcome {
-        case succeeded
-        case failed
-        case cancelled
     }
 
     private let state = CriticalState(State())
@@ -218,7 +219,26 @@ public final class NetworkActivityMonitor: Sendable {
         }
     }
 
-    private func finish(_ token: OperationToken, outcome: Outcome) {
+    /// Starts an operation whose lifetime is owned by a returned asynchronous
+    /// resource rather than by one `async` call. The returned closure is
+    /// idempotent so EOF, cancellation, and deallocation can safely race.
+    func beginLease(
+        _ kind: NetworkOperationKind
+    ) -> @Sendable (NetworkActivityOutcome) -> Void {
+        let token = begin(kind)
+        let completed = CriticalState(false)
+        return { [weak self] outcome in
+            let shouldFinish = completed.withCriticalRegion { value in
+                guard !value else { return false }
+                value = true
+                return true
+            }
+            guard shouldFinish else { return }
+            self?.finish(token, outcome: outcome)
+        }
+    }
+
+    private func finish(_ token: OperationToken, outcome: NetworkActivityOutcome) {
         state.withCriticalRegion { state in
             guard state.activeOperations.removeValue(forKey: token.id) != nil else {
                 return
