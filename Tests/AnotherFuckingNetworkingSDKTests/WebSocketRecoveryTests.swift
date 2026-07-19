@@ -96,4 +96,39 @@ struct WebSocketRecoveryTests {
 
         #expect(await connection.sentMessages == [.text("resume:cursor")])
     }
+
+    @Test("Typed JSON recovery adapter round-trips bounded checkpoints")
+    func typedAdapter() async throws {
+        let store = InMemoryWebSocketRecoveryStore()
+        let adapter = try JSONWebSocketRecoveryAdapter<Checkpoint>(
+            store: store,
+            key: "room"
+        ) { connection, context, checkpoint in
+            #expect(context.attempt == 1)
+            try await connection.send(.text(
+                "resume:" + (checkpoint?.cursor ?? "none")
+            ))
+        }
+
+        try await adapter.save(Checkpoint(cursor: "cursor-7", version: 7))
+        let connection = MockWebSocketConnection()
+        try await adapter.restore(
+            connection,
+            context: WebSocketReconnectContext(
+                attempt: 1,
+                previousURL: URL(string: "wss://example.com/socket")!
+            )
+        )
+
+        #expect(await connection.sentMessages == [.text("resume:cursor-7")])
+        try await adapter.remove()
+        let codec = JSONWebSocketRecoveryCodec<Checkpoint>()
+        let state = try codec.encode(Checkpoint(cursor: "a", version: 1))
+        #expect(try codec.decode(state) == Checkpoint(cursor: "a", version: 1))
+    }
+}
+
+private struct Checkpoint: Codable, Equatable, Sendable {
+    let cursor: String
+    let version: Int
 }

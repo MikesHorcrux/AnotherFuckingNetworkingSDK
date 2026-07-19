@@ -42,6 +42,8 @@ roadmap item is not a shipped feature.
   session-restorer policies.
 - Bounded, actor-isolated WebSocket recovery state stores and a contextual
   restorer adapter for application-defined cursors or session tokens.
+- Optional typed JSON WebSocket recovery codec and adapter with deterministic
+  encoding and bounded decode failures.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.
@@ -64,7 +66,8 @@ roadmap item is not a shipped feature.
 4. **WebSocket platform hardening** — server-specific wire framing and
    oldest-target/device integration coverage. The reliability wrapper now
    supplies bounded reconnect context and an app-owned recovery-state store;
-   protocol-specific cursor encoding and device integration remain app-owned.
+   protocol-specific wire framing and device integration remain app-owned;
+   the optional JSON codec covers only transport-neutral `Codable` checkpoints.
 5. **Platform matrix** — package declarations and availability guards now cover
    iOS, macOS, tvOS, watchOS, and visionOS, with Mac Catalyst builds in CI.
    CI builds the additional platforms whenever the runner has their SDKs and

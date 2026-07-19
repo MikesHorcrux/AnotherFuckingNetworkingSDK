@@ -785,6 +785,28 @@ stores are actor-isolated; the JSON store uses atomic writes and a lazy cache.
 The payload remains application-owned protocol data, so redact or encrypt it
 when it contains credentials or user-sensitive cursors.
 
+When the checkpoint is `Codable`, use the typed adapter to keep encoding and
+decoding bounded and deterministic:
+
+~~~swift
+struct Checkpoint: Codable, Sendable {
+    let cursor: String
+    let version: Int
+}
+
+let typedRecovery = try JSONWebSocketRecoveryAdapter<Checkpoint>(
+    store: JSONWebSocketRecoveryStore(fileURL: recoveryURL),
+    key: "lobby"
+) { connection, _, checkpoint in
+    try await connection.send(text: "resume:" + (checkpoint?.cursor ?? "none"))
+}
+
+try await typedRecovery.save(Checkpoint(cursor: "cursor-42", version: 42))
+~~~
+
+The JSON codec rejects malformed payloads and preserves the same 64 KiB bound;
+it does not make product-specific replay or authentication decisions.
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:
