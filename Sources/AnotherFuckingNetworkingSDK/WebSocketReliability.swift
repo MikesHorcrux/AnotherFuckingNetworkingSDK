@@ -62,6 +62,31 @@ public typealias WebSocketSessionRestorer = @Sendable (
     any WebSocketConnectionProtocol
 ) async throws -> Void
 
+/// Context for application-specific subscription or cursor restoration.
+public struct WebSocketReconnectContext: Equatable, Sendable {
+    /// The one-based reconnect attempt that is about to be opened.
+    public let attempt: Int
+    /// The URL of the connection that failed or was replaced.
+    public let previousURL: URL
+    /// The subprotocol negotiated by the previous connection, if any.
+    public let previousSubprotocol: String?
+
+    public init(
+        attempt: Int,
+        previousURL: URL,
+        previousSubprotocol: String? = nil
+    ) {
+        self.attempt = max(1, attempt)
+        self.previousURL = previousURL
+        self.previousSubprotocol = previousSubprotocol
+    }
+}
+
+public typealias WebSocketSessionRestorerWithContext = @Sendable (
+    any WebSocketConnectionProtocol,
+    WebSocketReconnectContext
+) async throws -> Void
+
 /// A client wrapper that adds bounded reconnect and optional heartbeat policy.
 ///
 /// The underlying `WebSocketClientProtocol` remains responsible for one
@@ -77,6 +102,7 @@ public struct WebSocketReliabilityClient<BaseClient: WebSocketClientProtocol>:
     private let sleeper: WebSocketReliabilitySleeper
     private let random: WebSocketReliabilityRandom
     private let restorer: WebSocketSessionRestorer?
+    private let restorerWithContext: WebSocketSessionRestorerWithContext?
 
     public init(
         client: BaseClient,
@@ -87,13 +113,15 @@ public struct WebSocketReliabilityClient<BaseClient: WebSocketClientProtocol>:
         random: @escaping WebSocketReliabilityRandom = {
             Double.random(in: 0...1)
         },
-        restorer: WebSocketSessionRestorer? = nil
+        restorer: WebSocketSessionRestorer? = nil,
+        restorerWithContext: WebSocketSessionRestorerWithContext? = nil
     ) {
         baseClient = client
         self.policy = policy
         self.sleeper = sleeper
         self.random = random
         self.restorer = restorer
+        self.restorerWithContext = restorerWithContext
     }
 
     public func connect<R: WebSocketRequest>(
@@ -107,7 +135,8 @@ public struct WebSocketReliabilityClient<BaseClient: WebSocketClientProtocol>:
             policy: policy,
             sleeper: sleeper,
             random: random,
-            restorer: restorer
+            restorer: restorer,
+            restorerWithContext: restorerWithContext
         )
         await connection.startHeartbeat()
         return connection
@@ -194,6 +223,7 @@ public actor WebSocketReliabilityConnection<
     private let sleeper: WebSocketReliabilitySleeper
     private let random: WebSocketReliabilityRandom
     private let restorer: WebSocketSessionRestorer?
+    private let restorerWithContext: WebSocketSessionRestorerWithContext?
     private let broadcaster: WebSocketReliabilityStateBroadcaster
     private var current: any WebSocketConnectionProtocol
     private var closedByCaller = false
@@ -206,7 +236,8 @@ public actor WebSocketReliabilityConnection<
         policy: WebSocketReliabilityPolicy,
         sleeper: @escaping WebSocketReliabilitySleeper,
         random: @escaping WebSocketReliabilityRandom,
-        restorer: WebSocketSessionRestorer?
+        restorer: WebSocketSessionRestorer?,
+        restorerWithContext: WebSocketSessionRestorerWithContext?
     ) {
         self.client = client
         self.request = request
@@ -214,6 +245,7 @@ public actor WebSocketReliabilityConnection<
         self.sleeper = sleeper
         self.random = random
         self.restorer = restorer
+        self.restorerWithContext = restorerWithContext
         current = initial
         url = initial.url
         negotiatedSubprotocol = initial.negotiatedSubprotocol
@@ -331,8 +363,19 @@ public actor WebSocketReliabilityConnection<
         )
         try await sleeper(delay)
         try Task.checkCancellation()
+        let previousURL = current.url
+        let previousSubprotocol = current.negotiatedSubprotocol
         let connection = try await client.connect(request)
-        if let restorer {
+        if let restorerWithContext {
+            try await restorerWithContext(
+                connection,
+                WebSocketReconnectContext(
+                    attempt: attempt,
+                    previousURL: previousURL,
+                    previousSubprotocol: previousSubprotocol
+                )
+            )
+        } else if let restorer {
             try await restorer(connection)
         }
         current = connection

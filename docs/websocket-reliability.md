@@ -34,11 +34,30 @@ let reliable = WebSocketReliabilityClient(
 let connection = try await reliable.connect(ChatSocket(roomID: "42"))
 ```
 
+When cursor recovery needs the reconnect attempt or the prior negotiated
+session, use `restorerWithContext`. The context is bounded metadata; persist
+the cursor or session token in an app-owned actor or database and send it only
+after the replacement handshake succeeds.
+
+```swift
+let reliable = WebSocketReliabilityClient(
+    client: client,
+    restorerWithContext: { connection, context in
+        let cursor = await cursorStore.load()
+        try await connection.send(.text(
+            "resume cursor=\(cursor ?? \"none\") attempt=\(context.attempt)"
+        ))
+    }
+)
+```
+
 `send`, `receive`, and `ping` retry only transport, connection-closed,
 handshake, and unknown transport failures. A successfully accepted send is not
 replayed by the wrapper after a later error. The wrapper retries a receive
 after reconnecting, so applications should make subscription and server-side
-cursor restoration explicit in the `restorer` closure.
+cursor restoration explicit in a restorer closure. `restorerWithContext` is
+preferred when the server protocol needs the reconnect attempt or prior
+subprotocol as part of that decision.
 
 ## Backoff and heartbeats
 

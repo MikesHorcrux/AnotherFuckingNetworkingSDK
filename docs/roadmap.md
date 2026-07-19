@@ -23,8 +23,8 @@ roadmap item is not a shipped feature.
 - Transfer delegate task-metrics telemetry with privacy-safe snapshots.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
-- Opt-in WebSocket reconnect, bounded backoff, heartbeat, and session-restorer
-  policies.
+- Opt-in WebSocket reconnect, bounded backoff, heartbeat, and contextual
+  session-restorer policies.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.
@@ -42,7 +42,9 @@ roadmap item is not a shipped feature.
 3. **Streaming multipart integration** — broader upload retry, signing, and
    oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
-   adapters and oldest-target integration coverage.
+   adapters and oldest-target integration coverage. The reliability wrapper
+   now supplies bounded reconnect context; protocol-specific cursor stores and
+   device integration remain app-owned.
 5. **Platform matrix** — package declarations and availability guards now cover
    iOS, macOS, tvOS, watchOS, and visionOS, with Mac Catalyst builds in CI.
    CI builds the additional platforms whenever the runner has their SDKs and
