@@ -12,6 +12,9 @@ roadmap item is not a shipped feature.
 - Single-pass HTTP byte streams with bounded failures and lifecycle activity.
 - Configurable 32 MiB response-body limits for buffered and streaming APIs,
   with per-request overrides and typed oversize errors.
+- Buffered HTTP responses are collected incrementally through URLSession byte
+  streams, so accepted bodies stop at the configured limit and rejected bodies
+  retain only the bounded failure prefix.
 - Bounded Server-Sent Events parsing over HTTP byte streams with UTF-8,
   CRLF/LF, multiline data, retry metadata, and cancellation-safe iteration.
 - Typed bounded JSON Lines/NDJSON streaming over HTTP byte streams with

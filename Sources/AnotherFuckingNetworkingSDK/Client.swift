@@ -208,6 +208,7 @@ private final class DataTaskMetricsDelegate: NSObject,
 public final class APIClient: APIClientTransferProgressProtocol, APIClientStreamingProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
+    private static let maximumHTTPFailureBodyBytes = 1_048_576
     /// Applies process-wide policy to every fully assembled ``URLRequest``.
     ///
     /// The hook runs after request-specific customization, body encoding, and
@@ -615,8 +616,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         let acceptedStatusCodes = request.acceptedStatusCodes
         let retryPolicy = request.retryPolicy
         let configuration = state.withCriticalRegion { $0 }
-        let maximumResponseBodyBytes = request.maximumResponseBodyBytes
-            ?? configuration.maximumResponseBodyBytes
+        let maximumResponseBodyBytes = Self.normalizedResponseBodyLimit(
+            request.maximumResponseBodyBytes
+                ?? configuration.maximumResponseBodyBytes
+        )
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -778,8 +781,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             let acceptedStatusCodes = request.acceptedStatusCodes
             let retryPolicy = request.retryPolicy
             let configuration = state.withCriticalRegion { $0 }
-            let maximumResponseBodyBytes = request.maximumResponseBodyBytes
-                ?? configuration.maximumResponseBodyBytes
+            let maximumResponseBodyBytes = Self.normalizedResponseBodyLimit(
+                request.maximumResponseBodyBytes
+                    ?? configuration.maximumResponseBodyBytes
+            )
             let urlRequest = try Self.makeURLRequest(
                 request,
                 configuration: configuration
@@ -810,8 +815,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 } else {
                     delegate = nil
                 }
-                return try await self.urlSession.data(
+                return try await self.collectBufferedResponse(
                     for: urlRequest,
+                    acceptedStatusCodes: acceptedStatusCodes,
+                    maximumResponseBodyBytes: maximumResponseBodyBytes,
                     delegate: delegate
                 )
             }
@@ -986,8 +993,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
-                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
-                        ?? configuration.maximumResponseBodyBytes,
+                    maximumResponseBodyBytes: Self.normalizedResponseBodyLimit(
+                        request.maximumResponseBodyBytes
+                            ?? configuration.maximumResponseBodyBytes
+                    ),
                     telemetry: telemetry
                 ) {
                     let attempt = attemptState.withCriticalRegion { value in
@@ -1018,8 +1027,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
-                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
-                        ?? configuration.maximumResponseBodyBytes,
+                    maximumResponseBodyBytes: Self.normalizedResponseBodyLimit(
+                        request.maximumResponseBodyBytes
+                            ?? configuration.maximumResponseBodyBytes
+                    ),
                     beforeRetry: {
                         try await self.fileIOExecutor.run {
                             try Self.validateUploadSource(fileURL)
@@ -1060,8 +1071,10 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
-                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
-                        ?? configuration.maximumResponseBodyBytes,
+                    maximumResponseBodyBytes: Self.normalizedResponseBodyLimit(
+                        request.maximumResponseBodyBytes
+                            ?? configuration.maximumResponseBodyBytes
+                    ),
                     beforeRetry: {
                         try await self.fileIOExecutor.run {
                             try form.validateSources()
@@ -1630,7 +1643,9 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
                 throw NetworkError.requestFailed(Self.makeHTTPFailure(
                     response: httpResponse,
-                    data: data.count <= 1_024 * 1_024 ? data : nil
+                    data: data.count <= Self.maximumHTTPFailureBodyBytes
+                        ? data
+                        : nil
                 ))
             }
 
@@ -1727,7 +1742,62 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             }
             return NetworkError.transport(urlError)
         }
+        if let networkError = error as? NetworkError {
+            return networkError
+        }
         return NetworkError.unknown(error)
+    }
+
+    private static func normalizedResponseBodyLimit(_ value: Int?) -> Int? {
+        value.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// Collects a buffered response incrementally so a configured limit is
+    /// enforced while bytes are arriving, rather than after URLSession has
+    /// already materialized an unbounded `Data` value. Rejected responses are
+    /// sampled only through the bounded HTTP-failure capture budget.
+    private func collectBufferedResponse(
+        for request: URLRequest,
+        acceptedStatusCodes: HTTPStatusPolicy,
+        maximumResponseBodyBytes: Int?,
+        delegate: URLSessionTaskDelegate?
+    ) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await urlSession.bytes(
+            for: request,
+            delegate: delegate
+        )
+        let isAcceptedResponse = (response as? HTTPURLResponse).map {
+            acceptedStatusCodes.accepts($0.statusCode)
+        } ?? false
+        let captureLimit: Int?
+        if isAcceptedResponse {
+            captureLimit = maximumResponseBodyBytes.map {
+                $0 == Int.max ? Int.max : $0 + 1
+            }
+        } else {
+            captureLimit = Self.maximumHTTPFailureBodyBytes + 1
+        }
+
+        var data = Data()
+        if let captureLimit {
+            data.reserveCapacity(min(captureLimit, 64 * 1_024))
+        }
+
+        for try await byte in bytes {
+            if let captureLimit, data.count >= captureLimit {
+                bytes.task.cancel()
+                if isAcceptedResponse,
+                   let maximumResponseBodyBytes {
+                    throw NetworkError.responseBodyTooLarge(
+                        maximumBytes: maximumResponseBodyBytes,
+                        actualBytes: nil
+                    )
+                }
+                break
+            }
+            data.append(byte)
+        }
+        return (data, response)
     }
 
     private static func makeHTTPFailure(
@@ -1828,7 +1898,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
 
     /// Avoids loading an unexpectedly huge failed download into memory.
     private static func readDownloadErrorData(at url: URL) -> Data? {
-        let maximumBytes = 1_048_576
+        let maximumBytes = Self.maximumHTTPFailureBodyBytes
         guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
               let fileSize = values.fileSize,
               fileSize <= maximumBytes else {
@@ -1844,7 +1914,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
     private static func readStreamErrorData(
         _ bytes: URLSession.AsyncBytes
     ) async -> Data? {
-        let maximumBytes = 1_048_576
+        let maximumBytes = Self.maximumHTTPFailureBodyBytes
         var data = Data()
         data.reserveCapacity(min(maximumBytes, 4_096))
 

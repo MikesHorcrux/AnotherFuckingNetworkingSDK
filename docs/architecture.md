@@ -57,8 +57,9 @@ sequenceDiagram
     Client->>Client: snapshot configuration and policies
     Client->>Builder: build URLRequest
     Builder-->>Client: final URLRequest
-    Client->>URLSession: data/upload/download/bytes
-    URLSession-->>Client: response or transport error
+    Client->>URLSession: upload/download/bytes
+    URLSession-->>Client: response headers + byte stream
+    Client->>Client: incrementally collect bounded body
     Client->>Client: validate status and retry decision
     Client->>Decoder: decode successful body
     Decoder-->>Client: typed value
@@ -73,6 +74,15 @@ and WebSocket upgrade. WebSocket upgrades then run stricter validation so
 Foundation-owned upgrade fields cannot be overwritten by a general hook.
 Retry decisions use the final method where the transport can observe it;
 authentication replay has its own explicit safety policy.
+
+For ordinary buffered requests, the client uses URLSession's async byte
+stream and incrementally collects the body. Successful responses stop at the
+configured `maximumResponseBodyBytes` limit; rejected responses retain only a
+bounded diagnostic body (at most one mebibyte). This keeps the response limit
+meaningful for peak client memory while preserving metadata-first status
+validation. The
+explicit streaming API exposes the same underlying single-pass ownership
+directly to the caller.
 
 ## Policy composition
 
