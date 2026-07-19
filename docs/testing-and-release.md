@@ -38,9 +38,13 @@ env CLANG_MODULE_CACHE_PATH=/private/tmp/afn-clang-module-cache \
 ```
 
 The CI workflow should additionally cover the oldest deployment targets,
-distribution builds, and forward-looking Swift concurrency flags. The checked-in
-workflow runs the forward `NonisolatedNonsendingByDefault` build and generic
-iOS/macOS distribution builds.
+distribution builds, simulator execution, and forward-looking Swift
+concurrency flags. The checked-in workflow runs the forward
+`NonisolatedNonsendingByDefault` build, generic iOS/macOS distribution builds,
+and the package test suite on the first installed iOS simulator. The local
+`NWListener` WebSocket loopback fixture is skipped only on that simulator run
+because iOS Simulator does not provide the listener NECP entitlement; mock
+WebSocket coverage still runs there and the real loopback suite runs on macOS.
 
 ## Performance gates
 

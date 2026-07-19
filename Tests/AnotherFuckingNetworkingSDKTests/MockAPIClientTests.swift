@@ -800,9 +800,16 @@ private struct CustomizedMockRequest: Request {
     let method = HTTPMethod.post
 
     func customize(_ urlRequest: inout URLRequest) throws {
-        urlRequest.url?.append(queryItems: [
-            URLQueryItem(name: "token", value: token)
-        ])
+        if let url = urlRequest.url,
+           var components = URLComponents(
+               url: url,
+               resolvingAgainstBaseURL: false
+           ) {
+            var queryItems = components.queryItems ?? []
+            queryItems.append(URLQueryItem(name: "token", value: token))
+            components.queryItems = queryItems
+            urlRequest.url = components.url
+        }
         urlRequest.httpBody = Data(token.utf8)
         urlRequest.setValue(token, forHTTPHeaderField: "X-Signature")
     }
