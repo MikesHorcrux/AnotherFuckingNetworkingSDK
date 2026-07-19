@@ -23,7 +23,7 @@ struct MockAPIClientTests {
         let exactRequest = GetUserRequest(id: 1)
         let expected = TestUser(id: 1, displayName: "Exact")
         await mock.stubError(GetUserRequest.self, error: MockFixtureError.typeDefault)
-        await mock.stub(exactRequest, with: expected)
+        try await mock.stub(exactRequest, with: expected)
 
         #expect(try await mock.send(exactRequest) == expected)
 
@@ -43,7 +43,7 @@ struct MockAPIClientTests {
             GetUserRequest.self,
             with: TestUser(id: 0, displayName: "Default")
         )
-        await mock.stubError(exactRequest, error: MockFixtureError.exact)
+        try await mock.stubError(exactRequest, error: MockFixtureError.exact)
 
         do {
             _ = try await mock.send(exactRequest)
@@ -91,6 +91,24 @@ struct MockAPIClientTests {
         }
     }
 
+    @Test("Paginated failures propagate unchanged")
+    func pageFailure() async throws {
+        let mock = MockAPIClient()
+        await mock.stubPageError(
+            MockPageRequest.self,
+            error: MockFixtureError.typeDefault
+        )
+
+        do {
+            _ = try await mock.sendPage(
+                MockPageRequest(page: 1, pageSize: 20, filter: "active")
+            )
+            Issue.record("Expected the paginated error")
+        } catch let error as MockFixtureError {
+            #expect(error == .typeDefault)
+        }
+    }
+
     @Test("Exact page stubs distinguish pagination and filters")
     func exactPageMatching() async throws {
         let mock = MockAPIClient()
@@ -106,7 +124,7 @@ struct MockAPIClientTests {
             totalPages: 4
         )
         await mock.stubPage(MockPageRequest.self, with: fallback)
-        await mock.stubPage(exactRequest, with: exact)
+        try await mock.stubPage(exactRequest, with: exact)
 
         #expect(try await mock.sendPage(exactRequest) == exact)
         #expect(try await mock.sendPage(
@@ -153,7 +171,7 @@ struct MockAPIClientTests {
     func recordingAndReset() async throws {
         let mock = MockAPIClient()
         let request = RecordingRequest()
-        await mock.stub(request, with: EmptyResponse())
+        try await mock.stub(request, with: EmptyResponse())
 
         _ = try await mock.send(request)
 
@@ -163,6 +181,7 @@ struct MockAPIClientTests {
         #expect(record.operation == .request)
         #expect(record.requestTypeID == ObjectIdentifier(RecordingRequest.self))
         #expect(record.method == .post)
+        #expect(record.url.absoluteString == "https://mock.invalid/record?q=value")
         #expect(record.path == "record")
         #expect(record.queryItems == [URLQueryItem(name: "q", value: "value")])
         #expect(record.headers == ["X-Test": "header"])
@@ -183,6 +202,66 @@ struct MockAPIClientTests {
         }
     }
 
+    @Test("Exact stubs use bodies produced by the configured encoder")
+    func encodedBodyMatching() async throws {
+        let mock = MockAPIClient(encoderFactory: {
+            let encoder = JSONEncoder()
+            encoder.keyEncodingStrategy = .convertToSnakeCase
+            return encoder
+        })
+        let first = EncodedBodyRequest(displayName: "Arthur")
+        let second = EncodedBodyRequest(displayName: "Ford")
+        let firstResponse = TestUser(id: 1, displayName: "First")
+        let secondResponse = TestUser(id: 2, displayName: "Second")
+        try await mock.stub(first, with: firstResponse)
+        try await mock.stub(second, with: secondResponse)
+
+        #expect(try await mock.send(first) == firstResponse)
+        #expect(try await mock.send(second) == secondResponse)
+
+        let bodies = await mock.recordedRequests.compactMap(\.body)
+        let decodedBodies = try bodies.map {
+            try JSONSerialization.jsonObject(with: $0) as? [String: String]
+        }
+        #expect(decodedBodies == [
+            ["display_name": "Arthur"],
+            ["display_name": "Ford"]
+        ])
+    }
+
+    @Test("Exact stubs include custom final URLs")
+    func customURLMatching() async throws {
+        let baseURL = URL(string: "https://example.com/v1")!
+        let mock = MockAPIClient(baseURL: baseURL)
+        let first = CustomURLRequest(variant: "first")
+        let second = CustomURLRequest(variant: "second")
+        let firstResponse = TestUser(id: 1, displayName: "First")
+        let secondResponse = TestUser(id: 2, displayName: "Second")
+        try await mock.stub(first, with: firstResponse)
+        try await mock.stub(second, with: secondResponse)
+
+        #expect(try await mock.send(first) == firstResponse)
+        #expect(try await mock.send(second) == secondResponse)
+        #expect(await mock.recordedRequests.map(\.url.absoluteString) == [
+            "https://example.com/v1/shared?variant=first",
+            "https://example.com/v1/shared?variant=second"
+        ])
+    }
+
+    @Test("Exact stubs preserve order-sensitive duplicate query items")
+    func orderedQueryMatching() async throws {
+        let mock = MockAPIClient()
+        let first = OrderedQueryRequest(values: ["one", "two"])
+        let second = OrderedQueryRequest(values: ["two", "one"])
+        let firstResponse = TestUser(id: 1, displayName: "First")
+        let secondResponse = TestUser(id: 2, displayName: "Second")
+        try await mock.stub(first, with: firstResponse)
+        try await mock.stub(second, with: secondResponse)
+
+        #expect(try await mock.send(first) == firstResponse)
+        #expect(try await mock.send(second) == secondResponse)
+    }
+
     @Test("Injected delays are deterministic and do not use wall-clock sleeps")
     func injectedDelay() async throws {
         let capturedDelay = LockedBox<UInt64?>(nil)
@@ -199,12 +278,56 @@ struct MockAPIClientTests {
         #expect(capturedDelay.withLock { $0 } == 1_250_000_000)
     }
 
+    @Test("Delay conversion clamps huge values and ignores invalid values")
+    func delayBoundaries() async throws {
+        let capturedDelays = LockedBox<[UInt64]>([])
+        let mock = MockAPIClient(delay: .greatestFiniteMagnitude) { nanoseconds in
+            capturedDelays.withLock { $0.append(nanoseconds) }
+        }
+        await mock.stub(
+            GetUserRequest.self,
+            with: TestUser(id: 1, displayName: "Delayed")
+        )
+
+        _ = try await mock.send(GetUserRequest(id: 1))
+        await mock.setDelay(.infinity)
+        _ = try await mock.send(GetUserRequest(id: 2))
+        await mock.setDelay(.nan)
+        _ = try await mock.send(GetUserRequest(id: 3))
+        await mock.setDelay(-1)
+        _ = try await mock.send(GetUserRequest(id: 4))
+
+        #expect(capturedDelays.withLock { $0 } == [UInt64.max])
+    }
+
+    @Test("A pre-cancelled mock send never attempts body encoding")
+    func cancellationBeforeEncoding() async throws {
+        let gate = AsyncSignal()
+        let mock = MockAPIClient()
+        await mock.stub(FailingMockEncodingRequest.self, with: EmptyResponse())
+        let task = Task {
+            await gate.wait()
+            return try await mock.send(FailingMockEncodingRequest())
+        }
+
+        task.cancel()
+        await gate.signal()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(await mock.recordedRequests.isEmpty)
+    }
+
     @Test("Cancellation during a mock delay remains CancellationError")
     func cancellation() async throws {
         let started = AsyncSignal()
         let mock = MockAPIClient(delay: 60) { _ in
             await started.signal()
-            try await Task.sleep(nanoseconds: UInt64.max)
+            try await Task.sleep(nanoseconds: 5_000_000_000)
         }
         await mock.stub(
             GetUserRequest.self,
@@ -247,6 +370,108 @@ struct MockAPIClientTests {
         #expect(records.map(\.sequenceID).sorted() == Array(0..<100))
         #expect(Set(records.map(\.path)).count == 100)
     }
+
+    @Test("Compatibility aliases remain actor-safe and observable")
+    func compatibilityAliases() async throws {
+        let mock = MockAPIClient()
+        let ordinary = TestUser(id: 1, displayName: "Ordinary")
+        let page = PaginatedResponse(
+            items: [TestUser(id: 2, displayName: "Page")],
+            currentPage: 2,
+            totalPages: 3
+        )
+        await mock.mock(GetUserRequest.self, with: ordinary)
+        await mock.mock(MockPageRequest.self, with: page)
+
+        #expect(try await mock.send(GetUserRequest(id: 1)) == ordinary)
+        #expect(try await mock.sendPage(
+            MockPageRequest(page: 2, pageSize: 20, filter: "active")
+        ) == page)
+        #expect(await mock.calledRequests == ["users/1", "users?page=2"])
+
+        await mock.resetMocks()
+        #expect(await mock.recordedRequests.isEmpty)
+    }
+
+    @Test("Exact compatibility aliases and exact page errors still work")
+    func exactCompatibilityAliases() async throws {
+        let mock = MockAPIClient()
+        let request = GetUserRequest(id: 1)
+        let pageRequest = MockPageRequest(page: 2, pageSize: 20, filter: "active")
+        try await mock.mock(
+            request,
+            with: TestUser(id: 1, displayName: "Exact")
+        )
+        try await mock.mockError(
+            GetUserRequest(id: 2),
+            with: MockFixtureError.exact
+        )
+        try await mock.stubPageError(
+            pageRequest,
+            error: MockFixtureError.typeDefault
+        )
+
+        #expect(try await mock.send(request).displayName == "Exact")
+        await #expect(throws: MockFixtureError.exact) {
+            try await mock.send(GetUserRequest(id: 2))
+        }
+        await #expect(throws: MockFixtureError.typeDefault) {
+            try await mock.sendPage(pageRequest)
+        }
+    }
+
+    @Test("Request construction failures remain typed in registration and sends")
+    func requestConstructionFailures() async throws {
+        let mock = MockAPIClient()
+
+        do {
+            try await mock.stub(
+                InvalidMockURLRequest(),
+                with: EmptyResponse()
+            )
+            Issue.record("Expected exact registration to reject the URL")
+        } catch let error as NetworkError {
+            guard case .invalidURL = error else {
+                Issue.record("Expected invalidURL, got \(error)")
+                return
+            }
+        }
+
+        await mock.stub(FailingMockEncodingRequest.self, with: EmptyResponse())
+        do {
+            _ = try await mock.send(FailingMockEncodingRequest())
+            Issue.record("Expected mock body encoding to fail")
+        } catch let error as NetworkError {
+            guard case .encodingFailed(let underlying) = error else {
+                Issue.record("Expected encodingFailed, got \(error)")
+                return
+            }
+            #expect(underlying is MockFixtureError)
+        }
+
+        do {
+            try await mock.stub(
+                CancellingMockEncodingRequest(),
+                with: EmptyResponse()
+            )
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
+    @Test("Missing-stub diagnostics are localized")
+    func localizedDiagnostics() async throws {
+        let mock = MockAPIClient()
+
+        do {
+            _ = try await mock.send(GetUserRequest(id: 404))
+            Issue.record("Expected a missing stub")
+        } catch let error as MockAPIClientError {
+            #expect(error.localizedDescription.contains("No request stub"))
+            #expect(error.localizedDescription.contains("users/404"))
+        }
+    }
 }
 
 private struct MockUserService: Sendable {
@@ -277,6 +502,80 @@ private struct RecordingRequest: Request {
     let queryItems: [URLQueryItem]? = [URLQueryItem(name: "q", value: "value")]
     let headers: [String: String]? = ["X-Test": "header"]
     let body: Data? = Data("body".utf8)
+}
+
+private struct EncodedBodyRequest: Request {
+    typealias ReturnType = TestUser
+
+    private struct Payload: Encodable {
+        let displayName: String
+    }
+
+    let displayName: String
+    let path = "encoded"
+    let method = HTTPMethod.post
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        try encoder.encode(Payload(displayName: displayName))
+    }
+}
+
+private struct CustomURLRequest: Request {
+    typealias ReturnType = TestUser
+
+    let variant: String
+    let path = "shared"
+
+    func makeURL(baseURL: URL) -> URL? {
+        guard var components = URLComponents(
+            url: baseURL.appendingPathComponent(path),
+            resolvingAgainstBaseURL: false
+        ) else {
+            return nil
+        }
+        components.queryItems = [URLQueryItem(name: "variant", value: variant)]
+        return components.url
+    }
+}
+
+private struct OrderedQueryRequest: Request {
+    typealias ReturnType = TestUser
+
+    let values: [String]
+    let path = "ordered"
+    var queryItems: [URLQueryItem]? {
+        values.map { URLQueryItem(name: "value", value: $0) }
+    }
+}
+
+private struct FailingMockEncodingRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "failing-encoding"
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        throw MockFixtureError.exact
+    }
+}
+
+private struct InvalidMockURLRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "invalid"
+
+    func makeURL(baseURL: URL) -> URL? {
+        nil
+    }
+}
+
+private struct CancellingMockEncodingRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "cancelling-encoding"
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        throw CancellationError()
+    }
 }
 
 private enum MockFixtureError: Error, Equatable {
