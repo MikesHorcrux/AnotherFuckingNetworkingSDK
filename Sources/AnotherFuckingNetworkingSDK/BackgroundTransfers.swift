@@ -1,5 +1,21 @@
 import Foundation
 
+let transferResumeDataLimitBytes = 8 * 1_024 * 1_024
+private let transferResumeDataEncodedLimitBytes =
+    ((transferResumeDataLimitBytes + 2) / 3) * 4
+
+private func boundedTransferResumeData(_ data: Data?) -> Data? {
+    guard let data, data.count <= transferResumeDataLimitBytes else {
+        return nil
+    }
+    return data
+}
+
+private func boundedTransferErrorSummary(_ value: String?) -> String? {
+    guard let value else { return nil }
+    return String(value.prefix(512))
+}
+
 /// The durable direction of a background transfer job.
 public enum TransferJobKind: String, Codable, Equatable, Sendable {
     case upload
@@ -57,9 +73,44 @@ public struct TransferJob: Codable, Equatable, Sendable {
         self.bytesCompleted = max(0, bytesCompleted)
         self.totalBytes = totalBytes.flatMap { $0 >= 0 ? $0 : nil }
         self.attempt = max(1, attempt)
-        self.resumeData = resumeData
+        self.resumeData = boundedTransferResumeData(resumeData)
         self.destinationURL = destinationURL
-        self.lastError = lastError
+        self.lastError = boundedTransferErrorSummary(lastError)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, requestKey, createdAt, updatedAt, state
+        case bytesCompleted, totalBytes, attempt, resumeData
+        case destinationURL, lastError
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let encodedResumeData = try container.decodeIfPresent(
+            String.self,
+            forKey: .resumeData
+        )
+        let decodedResumeData: Data?
+        if let encodedResumeData,
+           encodedResumeData.utf8.count <= transferResumeDataEncodedLimitBytes {
+            decodedResumeData = Data(base64Encoded: encodedResumeData)
+        } else {
+            decodedResumeData = nil
+        }
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            kind: try container.decode(TransferJobKind.self, forKey: .kind),
+            requestKey: try container.decode(String.self, forKey: .requestKey),
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            state: try container.decode(TransferJobState.self, forKey: .state),
+            bytesCompleted: try container.decode(Int64.self, forKey: .bytesCompleted),
+            totalBytes: try container.decodeIfPresent(Int64.self, forKey: .totalBytes),
+            attempt: try container.decode(Int.self, forKey: .attempt),
+            resumeData: decodedResumeData,
+            destinationURL: try container.decodeIfPresent(URL.self, forKey: .destinationURL),
+            lastError: try container.decodeIfPresent(String.self, forKey: .lastError)
+        )
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
 
     /// Applies an observed progress event without changing terminal state.
@@ -72,7 +123,7 @@ public struct TransferJob: Codable, Equatable, Sendable {
             self.totalBytes = totalBytes
         }
         attempt = max(attempt, update.progress.attempt)
-        resumeData = update.resumeData ?? resumeData
+        resumeData = boundedTransferResumeData(update.resumeData) ?? resumeData
         destinationURL = update.destinationURL ?? destinationURL
         updatedAt = now
     }
@@ -93,7 +144,7 @@ public struct TransferJob: Codable, Equatable, Sendable {
         now: Date
     ) {
         state = .paused
-        self.resumeData = resumeData ?? self.resumeData
+        self.resumeData = boundedTransferResumeData(resumeData) ?? self.resumeData
         updatedAt = now
     }
 
@@ -126,7 +177,9 @@ public struct TransferJob: Codable, Equatable, Sendable {
         // contain response bodies, file paths, credentials, or user data.
         let nsError = error as NSError
         let domain = String(nsError.domain.prefix(128))
-        lastError = domain + " (" + String(nsError.code) + ")"
+        lastError = boundedTransferErrorSummary(
+            domain + " (" + String(nsError.code) + ")"
+        )
         updatedAt = now
     }
 }

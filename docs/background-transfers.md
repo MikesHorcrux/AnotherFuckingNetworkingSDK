@@ -127,6 +127,8 @@ data-retention policy.
 ## Safety rules
 
 - Keep resume data bounded and treat it as sensitive opaque transport state.
+  `TransferJob` and `JSONTransferJobStore` enforce the same 8 MiB bound at
+  construction and restore time.
 - Failed job records retain only a bounded NSError domain/code identity; do not
   persist localized error text or response payloads in durable state.
 - Never delete an upload source as part of pause, retry, or cancellation.

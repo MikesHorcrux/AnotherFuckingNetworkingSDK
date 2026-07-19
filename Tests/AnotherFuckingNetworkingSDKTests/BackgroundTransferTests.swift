@@ -44,6 +44,36 @@ struct BackgroundTransferTests {
         #expect(restored == [job])
     }
 
+    @Test("Resume data is bounded at construction and JSON restore")
+    func resumeDataIsBounded() async throws {
+        let oversized = Data(repeating: 1, count: 8 * 1_024 * 1_024 + 1)
+        let direct = TransferJob(
+            kind: .download,
+            requestKey: "large",
+            resumeData: oversized
+        )
+        #expect(direct.resumeData == nil)
+
+        let seed = TransferJob(
+            kind: .download,
+            requestKey: "large",
+            resumeData: Data([1])
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(seed)
+            ) as? [String: Any]
+        )
+        object["resumeData"] = oversized.base64EncodedString()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("afn-transfer-resume-(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try JSONSerialization.data(withJSONObject: [object]).write(to: url)
+
+        let restored = try await JSONTransferJobStore(fileURL: url).loadAll()
+        #expect(restored.first?.resumeData == nil)
+    }
+
     @Test("Coordinator persists progress and a committed success")
     func successfulExecution() async throws {
         let store = InMemoryTransferJobStore()
