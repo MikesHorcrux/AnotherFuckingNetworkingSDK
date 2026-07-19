@@ -20,19 +20,24 @@ struct NetworkTelemetryTests {
         _ = try await client.send(GetUserRequest(id: 42))
 
         let captured = events.withLock { $0 }
-        #expect(captured.map(\.phase) == [
+        #expect(captured.map(\.phase).filter { $0 != .taskMetrics } == [
             .started,
             .attemptStarted,
             .attemptCompleted,
             .succeeded
         ])
         #expect(Set(captured.map(\.operationID)).count == 1)
-        #expect(captured[1].attempt == 1)
-        #expect(captured[2].statusCode == 200)
-        #expect(captured[2].bytesReceived ?? 0 > 0)
-        #expect(captured[2].durationNanoseconds != nil)
-        #expect(captured[3].durationNanoseconds != nil)
-        #expect(captured.allSatisfy { $0.taskMetrics == nil })
+        let attemptStarted = captured.first { $0.phase == .attemptStarted }
+        let attemptCompleted = captured.first { $0.phase == .attemptCompleted }
+        #expect(attemptStarted?.attempt == 1)
+        #expect(attemptCompleted?.statusCode == 200)
+        #expect(attemptCompleted?.bytesReceived ?? 0 > 0)
+        #expect(attemptCompleted?.durationNanoseconds != nil)
+        #expect(captured.last?.durationNanoseconds != nil)
+        let metrics = captured.filter { $0.phase == .taskMetrics }
+        #expect(metrics.count == 1)
+        #expect(metrics.first?.attempt == 1)
+        #expect(metrics.first?.taskMetrics != nil)
     }
 
     @Test("Rejected HTTP responses classify failures without exposing payloads")

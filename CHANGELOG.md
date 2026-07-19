@@ -54,6 +54,8 @@ integrating host app.
   typed recovery codecs, and typed JSON/binary message codecs.
 - Privacy-safe activity monitoring, telemetry, task metrics, logging, network
   path observation, and actor-based testing fixtures.
+- Ordinary HTTP data requests now forward privacy-safe `URLSessionTaskMetrics`
+  snapshots alongside the existing transfer and WebSocket metrics events.
 
 ### Evidence and release gates
 

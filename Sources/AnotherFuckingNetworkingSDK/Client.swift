@@ -177,6 +177,29 @@ private final class TransferProgressDelegate: NSObject,
     }
 }
 
+private final class DataTaskMetricsDelegate: NSObject,
+    URLSessionTaskDelegate,
+    @unchecked Sendable {
+    private let attempt: Int
+    private let handler: @Sendable (Int, NetworkTaskMetricsSnapshot) -> Void
+
+    init(
+        attempt: Int,
+        handler: @escaping @Sendable (Int, NetworkTaskMetricsSnapshot) -> Void
+    ) {
+        self.attempt = attempt
+        self.handler = handler
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        handler(attempt, NetworkTaskMetricsSnapshot(metrics))
+    }
+}
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
@@ -726,13 +749,35 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 request,
                 configuration: configuration
             )
+            let attemptState = CriticalState(0)
             let (data, httpResponse) = try await performDataRequest(
                 urlRequest,
                 acceptedStatusCodes: acceptedStatusCodes,
                 retryPolicy: retryPolicy,
                 telemetry: telemetryContext
             ) {
-                try await self.urlSession.data(for: urlRequest)
+                let attempt = attemptState.withCriticalRegion { value in
+                    value += 1
+                    return value
+                }
+                let delegate: DataTaskMetricsDelegate?
+                if let telemetryContext {
+                    delegate = DataTaskMetricsDelegate(
+                        attempt: attempt
+                    ) { [telemetryContext] attempt, snapshot in
+                        telemetryContext.emit(
+                            phase: .taskMetrics,
+                            attempt: attempt,
+                            taskMetrics: snapshot
+                        )
+                    }
+                } else {
+                    delegate = nil
+                }
+                return try await self.urlSession.data(
+                    for: urlRequest,
+                    delegate: delegate
+                )
             }
             let result = try Self.makeResponse(
                 request,
