@@ -38,6 +38,51 @@ struct BackgroundURLSessionTests {
         #expect(descriptor.isDownload)
     }
 
+    @Test("Background events route through actor-isolated durable bindings")
+    func eventRouterRoutesAndReconciles() async throws {
+        let jobID = UUID()
+        let route = BackgroundTransferRoute(
+            taskIdentifier: 42,
+            jobID: jobID,
+            kind: .download
+        )
+        let router = BackgroundTransferEventRouter()
+        try await router.bind(route)
+
+        let progress = BackgroundTransferEvent.downloadProgress(
+            taskIdentifier: 42,
+            bytesWritten: 8,
+            totalBytes: 16
+        )
+        let routed = await router.handle(progress)
+        #expect(routed?.route == route)
+        #expect(routed?.event == progress)
+        #expect((await router.snapshot()) == [route])
+
+        try await router.reconcile(route)
+        await router.unbind(taskIdentifier: 42)
+        #expect(await router.handle(progress) == nil)
+        #expect(await router.handle(.backgroundEventsFinished)?.route == nil)
+    }
+
+    @Test("Background event router rejects task ID collisions")
+    func eventRouterRejectsCollisions() async throws {
+        let router = BackgroundTransferEventRouter()
+        try await router.bind(BackgroundTransferRoute(
+            taskIdentifier: 7,
+            jobID: UUID(),
+            kind: .upload
+        ))
+
+        await #expect(throws: BackgroundTransferRouterError.taskAlreadyBound(7)) {
+            try await router.bind(BackgroundTransferRoute(
+                taskIdentifier: 7,
+                jobID: UUID(),
+                kind: .download
+            ))
+        }
+    }
+
     @Test("Background completion is delivered after the terminal event")
     func backgroundCompletionOrdering() {
         let events = LockedBox<[BackgroundTransferEvent]>([])

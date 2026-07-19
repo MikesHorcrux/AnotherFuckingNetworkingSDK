@@ -353,6 +353,11 @@ public actor TransferJobCoordinator {
         jobs.values.sorted { $0.createdAt < $1.createdAt }
     }
 
+    /// Returns one durable job without exposing the coordinator's storage.
+    public func job(id: UUID) -> TransferJob? {
+        jobs[id]
+    }
+
     public func enqueue(_ job: TransferJob) async throws {
         guard jobs[job.id] == nil else { return }
         jobs[job.id] = job

@@ -70,7 +70,13 @@ handling delegate events:
 ```swift
 for task in await adapter.transferTasks() {
     guard let jobID = task.jobID else { continue }
-    // Bind task.taskIdentifier to jobID in the app-owned event router.
+    let job = try await coordinator.job(id: jobID)
+    guard let job else { continue }
+    try await backgroundRouter.reconcile(BackgroundTransferRoute(
+        taskIdentifier: task.taskIdentifier,
+        jobID: job.id,
+        kind: job.kind
+    ))
 }
 ```
 
@@ -78,6 +84,12 @@ for task in await adapter.transferTasks() {
 event, while `backgroundEventsFinished` has no task identifier. This makes it
 possible to route progress, metrics, temporary files, and completion events
 after process termination without persisting requests or credentials.
+
+`BackgroundTransferEventRouter` is an actor that rejects accidental task-ID
+collisions, supports idempotent relaunch reconciliation, and returns typed
+`BackgroundTransferRoutedEvent` values. It intentionally leaves file moves,
+resume-data validation, authentication, and terminal job commits to the
+application's `TransferJobCoordinator` policy.
 
 ```mermaid
 sequenceDiagram
@@ -89,6 +101,7 @@ sequenceDiagram
     Session-->>App: taskIdentifier + jobID descriptors
     App->>App: bind identifiers to jobs
     Session-->>App: BackgroundTransferEvent
+    App->>App: BackgroundTransferEventRouter.handle
     App->>Store: persist checkpoint or terminal state
 ```
 

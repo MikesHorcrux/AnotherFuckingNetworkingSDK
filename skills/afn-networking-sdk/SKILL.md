@@ -108,8 +108,9 @@ resume data, and relaunch recovery belong in a lifecycle-bound module. Use
 `BackgroundURLSessionAdapter` for Foundation delegate events and keep
 `TransferJobCoordinator` as the single durable state writer; pass `jobID` when
 creating background tasks and reconcile `transferTasks()` after relaunch so
-task identifiers route back to durable jobs. Do not pretend a foreground
-convenience task is durable.
+task identifiers route back to durable jobs. Use `BackgroundTransferEventRouter`
+for actor-isolated collision checks and event routing. Do not pretend a
+foreground convenience task is durable.
 
 ### WebSockets and Observation
 
