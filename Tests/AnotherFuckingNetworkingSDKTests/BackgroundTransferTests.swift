@@ -117,4 +117,34 @@ struct BackgroundTransferTests {
         #expect(paused.bytesCompleted == 5)
         #expect(paused.resumeData == Data([7, 7]))
     }
+
+    @Test("Failed jobs persist bounded error identity without sensitive text")
+    func failurePersistsSafeErrorIdentity() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let job = TransferJob(kind: .download, requestKey: "private-export")
+        try await coordinator.enqueue(job)
+
+        do {
+            _ = try await coordinator.execute(id: job.id) { _, _ in
+                throw NSError(
+                    domain: "com.example.server",
+                    code: 503,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Authorization: Bearer secret-response-body"
+                    ]
+                )
+            }
+            Issue.record("Expected transfer failure")
+        } catch let error as NSError {
+            #expect(error.domain == "com.example.server")
+            #expect(error.code == 503)
+        }
+
+        let failed = try #require(await coordinator.snapshot().first)
+        #expect(failed.state == .failed)
+        #expect(failed.lastError == "com.example.server (503)")
+        #expect(failed.lastError?.contains("secret") == false)
+    }
 }

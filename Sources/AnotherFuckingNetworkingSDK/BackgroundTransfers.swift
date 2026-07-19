@@ -120,7 +120,13 @@ public struct TransferJob: Codable, Equatable, Sendable {
         now: Date
     ) {
         state = .failed
-        lastError = String(describing: error)
+        // Durable job state can outlive the process and may be inspected or
+        // synced by application code. Persist only a bounded NSError identity
+        // instead of arbitrary localized/reflected error text, which can
+        // contain response bodies, file paths, credentials, or user data.
+        let nsError = error as NSError
+        let domain = String(nsError.domain.prefix(128))
+        lastError = domain + " (" + String(nsError.code) + ")"
         updatedAt = now
     }
 }
