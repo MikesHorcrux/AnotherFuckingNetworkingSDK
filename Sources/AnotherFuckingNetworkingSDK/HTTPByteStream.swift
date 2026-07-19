@@ -2,9 +2,9 @@ import Foundation
 
 /// A single-pass stream of bytes returned by an HTTP response.
 ///
-/// The response metadata is available before the first byte is consumed. The
-/// stream does not buffer the response in memory; cancellation of the task
-/// consuming the sequence cancels the underlying URL session task.
+/// The response metadata is available before the first byte is consumed. A
+/// URLSession-backed stream does not buffer the response in memory; cancelling
+/// the consuming task cancels the underlying URL session task.
 public struct HTTPByteStream: AsyncSequence, Sendable {
     public typealias Element = UInt8
 
@@ -19,7 +19,12 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
         metadata.value(forHTTPHeaderField: name)
     }
 
-    private let bytes: URLSession.AsyncBytes
+    private enum Storage: Sendable {
+        case urlSession(URLSession.AsyncBytes)
+        case data(Data)
+    }
+
+    private let storage: Storage
     private let lifecycle: Lifecycle?
 
     fileprivate final class Lifecycle: @unchecked Sendable {
@@ -45,17 +50,31 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
         metadata: HTTPResponseMetadata,
         finish: (@Sendable (NetworkActivityOutcome) -> Void)? = nil
     ) {
-        self.bytes = bytes
+        storage = .urlSession(bytes)
         self.metadata = metadata
         lifecycle = finish.map(Lifecycle.init(finish:))
     }
 
+    /// Creates a finite in-memory stream for deterministic adapters and test
+    /// doubles. Production callers should prefer the URLSession-backed stream
+    /// returned by ``APIClient/stream(_:)`` for large responses.
+    public init(data: Data, metadata: HTTPResponseMetadata) {
+        storage = .data(data)
+        self.metadata = metadata
+        lifecycle = nil
+    }
+
     public struct AsyncIterator: AsyncIteratorProtocol {
-        private var iterator: URLSession.AsyncBytes.Iterator
+        fileprivate enum IteratorStorage {
+            case urlSession(URLSession.AsyncBytes.Iterator)
+            case data(Data.Iterator)
+        }
+
+        private var iterator: IteratorStorage
         private let lifecycle: Lifecycle?
 
         fileprivate init(
-            iterator: URLSession.AsyncBytes.Iterator,
+            iterator: IteratorStorage,
             lifecycle: Lifecycle?
         ) {
             self.iterator = iterator
@@ -64,7 +83,15 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
 
         public mutating func next() async throws -> UInt8? {
             do {
-                let value = try await iterator.next()
+                let value: UInt8?
+                switch iterator {
+                case .urlSession(var iterator):
+                    value = try await iterator.next()
+                    self.iterator = .urlSession(iterator)
+                case .data(var iterator):
+                    value = iterator.next()
+                    self.iterator = .data(iterator)
+                }
                 if value == nil {
                     lifecycle?.complete(.succeeded)
                 }
@@ -81,19 +108,26 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(
-            iterator: bytes.makeAsyncIterator(),
-            lifecycle: lifecycle
-        )
+        switch storage {
+        case .urlSession(let bytes):
+            return AsyncIterator(
+                iterator: .urlSession(bytes.makeAsyncIterator()),
+                lifecycle: lifecycle
+            )
+        case .data(let data):
+            return AsyncIterator(
+                iterator: .data(data.makeIterator()),
+                lifecycle: lifecycle
+            )
+        }
     }
 
-    /// Cancels the underlying URL session task.
-    ///
-    /// Consuming-task cancellation remains the recommended way to stop a
-    /// stream. This method is useful when a stream is handed across a
-    /// component boundary and ownership needs to be ended explicitly.
+    /// Cancels the underlying URL session task when this is a URLSession-backed
+    /// stream. This is a no-op for a finite in-memory stream.
     public func cancel() {
-        bytes.task.cancel()
+        if case .urlSession(let bytes) = storage {
+            bytes.task.cancel()
+        }
         lifecycle?.complete(.cancelled)
     }
 }

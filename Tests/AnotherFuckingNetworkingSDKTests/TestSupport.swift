@@ -139,6 +139,7 @@ final class StubSession: @unchecked Sendable {
         decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
+        telemetry: NetworkTelemetry? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
         downloadOperation: DownloadOperation? = nil,
         retrySleeper: @escaping RetrySleeper = { nanoseconds in
@@ -157,6 +158,7 @@ final class StubSession: @unchecked Sendable {
             decoderFactory: decoderFactory,
             logger: logger,
             activityMonitor: activityMonitor,
+            telemetry: telemetry,
             fileIOExecutor: fileIOExecutor,
             downloadOperation: downloadOperation,
             retrySleeper: retrySleeper,

@@ -39,6 +39,21 @@ public protocol APIClientTransferProtocol: APIClientResponseProtocol {
     ) async throws -> DownloadResponse
 }
 
+/// A transfer-capable client that reports upload and download byte progress.
+public protocol APIClientTransferProgressProtocol: APIClientTransferProtocol {
+    func upload<R: Request>(
+        _ request: R,
+        from body: UploadBody,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> HTTPResponse<R.ReturnType>
+
+    func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> DownloadResponse
+}
+
 public extension APIClientTransferProtocol {
     /// Downloads to a unique temporary file owned by the caller.
     func download<R: DownloadRequest>(
@@ -62,17 +77,101 @@ typealias WebSocketTransportFactory = @Sendable (
 typealias DownloadOperation = @Sendable (
     URLRequest
 ) async throws -> (URL, URLResponse)
+typealias DownloadOperationWithDelegate = @Sendable (
+    URLRequest,
+    URLSessionTaskDelegate?
+) async throws -> (URL, URLResponse)
 
 typealias RetrySleeper = @Sendable (UInt64) async throws -> Void
 typealias RetryNowProvider = @Sendable () -> Date
 typealias RetryRandomProvider = @Sendable () -> Double
+
+private final class TransferProgressDelegate: NSObject,
+    URLSessionTaskDelegate,
+    URLSessionDownloadDelegate,
+    @unchecked Sendable {
+    private let operation: TransferProgressOperation
+    private let attempt: Int
+    private let handler: TransferProgressHandler
+    private let state: CriticalState<TransferProgress>
+
+    init(
+        operation: TransferProgressOperation,
+        attempt: Int,
+        handler: @escaping TransferProgressHandler
+    ) {
+        self.operation = operation
+        self.attempt = attempt
+        self.handler = handler
+        state = CriticalState(TransferProgress(
+            operation: operation,
+            phase: .started,
+            bytesCompleted: 0,
+            attempt: attempt
+        ))
+    }
+
+    var latest: TransferProgress {
+        state.withCriticalRegion { $0 }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        emit(
+            phase: .running,
+            bytesCompleted: totalBytesSent,
+            totalBytes: totalBytesExpectedToSend
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        emit(
+            phase: .running,
+            bytesCompleted: totalBytesWritten,
+            totalBytes: totalBytesExpectedToWrite
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {}
+
+    func emit(
+        phase: TransferProgressPhase,
+        bytesCompleted: Int64,
+        totalBytes: Int64? = nil
+    ) {
+        let event = TransferProgress(
+            operation: operation,
+            phase: phase,
+            bytesCompleted: bytesCompleted,
+            totalBytes: totalBytes,
+            attempt: attempt
+        )
+        state.withCriticalRegion { $0 = event }
+        handler(event)
+    }
+}
 
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientTransferProtocol, APIClientStreamingProtocol, WebSocketClientProtocol, Sendable {
+public final class APIClient: APIClientTransferProgressProtocol, APIClientStreamingProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -122,8 +221,10 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
     private let activityMonitor: NetworkActivityMonitor?
+    private let telemetry: NetworkTelemetry?
+    private let telemetrySequence = CriticalState(UInt64(0))
     private let fileIOExecutor: FileIOExecutor
-    private let downloadOperation: DownloadOperation
+    private let downloadOperationWithDelegate: DownloadOperationWithDelegate
     private let retrySleeper: RetrySleeper
     private let retryNow: RetryNowProvider
     private let retryRandom: RetryRandomProvider
@@ -136,7 +237,8 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
-        activityMonitor: NetworkActivityMonitor? = nil
+        activityMonitor: NetworkActivityMonitor? = nil,
+        telemetry: NetworkTelemetry? = nil
     ) {
         self.init(
             baseURL: baseURL,
@@ -146,6 +248,7 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
             decoderFactory: decoderFactory,
             logger: logger,
             activityMonitor: activityMonitor,
+            telemetry: telemetry,
             webSocketTransportFactory: { session, request, configuration in
                 URLSessionWebSocketTransport(
                     session: session,
@@ -166,6 +269,7 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
+        telemetry: NetworkTelemetry? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
         downloadOperation: DownloadOperation? = nil,
         retrySleeper: @escaping RetrySleeper = { nanoseconds in
@@ -188,9 +292,16 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         self.urlSession = urlSession
         self.logger = logger
         self.activityMonitor = activityMonitor
+        self.telemetry = telemetry
         self.fileIOExecutor = fileIOExecutor
-        self.downloadOperation = downloadOperation ?? { request in
-            try await urlSession.download(for: request)
+        self.downloadOperationWithDelegate = { request, delegate in
+            if let downloadOperation {
+                return try await downloadOperation(request)
+            }
+            return try await urlSession.download(
+                for: request,
+                delegate: delegate
+            )
         }
         self.retrySleeper = retrySleeper
         self.retryNow = retryNow
@@ -205,6 +316,67 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         state.withCriticalRegion(update)
     }
 
+    private func beginTelemetry(
+        _ kind: NetworkOperationKind
+    ) -> NetworkTelemetryContext? {
+        guard let telemetry else { return nil }
+        let operationID = telemetrySequence.withCriticalRegion { value in
+            let current = value
+            value &+= 1
+            return current
+        }
+        let context = NetworkTelemetryContext(
+            telemetry: telemetry,
+            operationID: operationID,
+            kind: kind
+        )
+        context.emit(phase: .started)
+        return context
+    }
+
+    private func finishTelemetry(
+        _ context: NetworkTelemetryContext?,
+        statusCode: Int? = nil,
+        bytesSent: Int64? = nil,
+        bytesReceived: Int64? = nil,
+        error: (any Error)? = nil
+    ) {
+        guard let context else { return }
+        if let error {
+            let phase: NetworkTelemetryPhase =
+                error is CancellationError || Task.isCancelled
+                    ? .cancelled
+                    : .failed
+            context.emit(
+                phase: phase,
+                statusCode: statusCode,
+                bytesSent: bytesSent,
+                bytesReceived: bytesReceived,
+                errorKind: phase == .failed
+                    ? networkTelemetryErrorKind(error)
+                    : nil,
+                durationNanoseconds: context.elapsedNanoseconds()
+            )
+        } else {
+            context.emit(
+                phase: .succeeded,
+                statusCode: statusCode,
+                bytesSent: bytesSent,
+                bytesReceived: bytesReceived,
+                durationNanoseconds: context.elapsedNanoseconds()
+            )
+        }
+    }
+
+    private static func uploadByteCount(_ body: UploadBody) -> Int64? {
+        switch body {
+        case .data(let data):
+            return Int64(data.count)
+        case .file:
+            return nil
+        }
+    }
+
     /// Opens a WebSocket after its HTTP upgrade handshake succeeds.
     ///
     /// The connection uses the same base URL, global headers, cookies,
@@ -212,11 +384,21 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
     public func connect<R: WebSocketRequest>(
         _ request: R
     ) async throws -> any WebSocketConnectionProtocol {
-        guard let activityMonitor else {
-            return try await connectWithoutMonitoring(request)
-        }
-        return try await activityMonitor.track(.webSocketHandshake) {
-            try await self.connectWithoutMonitoring(request)
+        let telemetryContext = beginTelemetry(.webSocketHandshake)
+        do {
+            let connection: any WebSocketConnectionProtocol
+            if let activityMonitor {
+                connection = try await activityMonitor.track(.webSocketHandshake) {
+                    try await self.connectWithoutMonitoring(request)
+                }
+            } else {
+                connection = try await connectWithoutMonitoring(request)
+            }
+            finishTelemetry(telemetryContext)
+            return connection
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
     }
 
@@ -279,18 +461,29 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
     /// Failed responses retain at most one mebibyte of body data in their
     /// ``HTTPFailure`` value.
     public func stream<R: HTTPRequest>(_ request: R) async throws -> HTTPByteStream {
-        guard let activityMonitor else {
-            return try await streamWithoutMonitoring(request, finish: nil)
-        }
-
-        let finish = activityMonitor.beginLease(.stream)
+        let telemetryContext = beginTelemetry(.stream)
+        let telemetryFinish = telemetryContext?.beginLease()
         do {
-            return try await streamWithoutMonitoring(request, finish: finish)
+            let finish: (@Sendable (NetworkActivityOutcome) -> Void)?
+            if let activityMonitor {
+                let activityFinish = activityMonitor.beginLease(.stream)
+                finish = { outcome in
+                    activityFinish(outcome)
+                    telemetryFinish?(outcome)
+                }
+            } else {
+                finish = telemetryFinish
+            }
+            return try await streamWithoutMonitoring(
+                request,
+                finish: finish,
+                telemetry: telemetryContext
+            )
         } catch {
-            finish(
+            telemetryFinish?(
                 Task.isCancelled || error is CancellationError
-                    ? NetworkActivityOutcome.cancelled
-                    : NetworkActivityOutcome.failed
+                    ? .cancelled
+                    : .failed
             )
             throw error
         }
@@ -298,7 +491,8 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
 
     private func streamWithoutMonitoring<R: HTTPRequest>(
         _ request: R,
-        finish: (@Sendable (NetworkActivityOutcome) -> Void)?
+        finish: (@Sendable (NetworkActivityOutcome) -> Void)?,
+        telemetry: NetworkTelemetryContext?
     ) async throws -> HTTPByteStream {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
@@ -313,6 +507,8 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         while true {
             try Task.checkCancellation()
             logger?.log(request: urlRequest)
+            let telemetryAttemptStartedAt = DispatchTime.now().uptimeNanoseconds
+            telemetry?.emit(phase: .attemptStarted, attempt: attempt)
 
             let bytes: URLSession.AsyncBytes
             let response: URLResponse
@@ -320,6 +516,14 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
                 (bytes, response) = try await urlSession.bytes(for: urlRequest)
             } catch {
                 let networkError = try Self.mappedTransportError(error)
+                telemetry?.emit(
+                    phase: .attemptFailed,
+                    attempt: attempt,
+                    errorKind: networkTelemetryErrorKind(networkError),
+                    durationNanoseconds: telemetry?.attemptElapsed(
+                        since: telemetryAttemptStartedAt
+                    )
+                )
                 try Task.checkCancellation()
                 let retryDelay: UInt64?
                 if case .transport(let urlError) = networkError {
@@ -348,12 +552,29 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 bytes.task.cancel()
+                telemetry?.emit(
+                    phase: .attemptFailed,
+                    attempt: attempt,
+                    errorKind: .invalidResponse,
+                    durationNanoseconds: telemetry?.attemptElapsed(
+                        since: telemetryAttemptStartedAt
+                    )
+                )
                 finish?(.failed)
                 throw NetworkError.invalidResponse
             }
 
             let metadata = HTTPResponseMetadata(httpResponse)
             guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+                telemetry?.emit(
+                    phase: .attemptFailed,
+                    attempt: attempt,
+                    statusCode: httpResponse.statusCode,
+                    errorKind: .httpStatus,
+                    durationNanoseconds: telemetry?.attemptElapsed(
+                        since: telemetryAttemptStartedAt
+                    )
+                )
                 let failure = HTTPFailure(metadata: metadata)
                 let retryDelay = retryPolicy.retryDelayNanoseconds(
                     afterAttempt: attempt,
@@ -382,6 +603,15 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
                 )
             }
 
+            telemetry?.emit(
+                phase: .attemptCompleted,
+                attempt: attempt,
+                statusCode: httpResponse.statusCode,
+                durationNanoseconds: telemetry?.attemptElapsed(
+                    since: telemetryAttemptStartedAt
+                )
+            )
+
             return HTTPByteStream(
                 bytes: bytes,
                 metadata: metadata,
@@ -406,26 +636,39 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         _ request: R
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
-        let acceptedStatusCodes = request.acceptedStatusCodes
-        let retryPolicy = request.retryPolicy
-        let configuration = state.withCriticalRegion { $0 }
-        let urlRequest = try Self.makeURLRequest(
-            request,
-            configuration: configuration
-        )
-        let (data, httpResponse) = try await performDataRequest(
-            urlRequest,
-            acceptedStatusCodes: acceptedStatusCodes,
-            retryPolicy: retryPolicy
-        ) {
-            try await self.urlSession.data(for: urlRequest)
+        let telemetryContext = beginTelemetry(.request)
+        do {
+            let acceptedStatusCodes = request.acceptedStatusCodes
+            let retryPolicy = request.retryPolicy
+            let configuration = state.withCriticalRegion { $0 }
+            let urlRequest = try Self.makeURLRequest(
+                request,
+                configuration: configuration
+            )
+            let (data, httpResponse) = try await performDataRequest(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes,
+                retryPolicy: retryPolicy,
+                telemetry: telemetryContext
+            ) {
+                try await self.urlSession.data(for: urlRequest)
+            }
+            let result = try Self.makeResponse(
+                request,
+                data: data,
+                response: httpResponse,
+                configuration: configuration
+            )
+            finishTelemetry(
+                telemetryContext,
+                statusCode: httpResponse.statusCode,
+                bytesReceived: Int64(data.count)
+            )
+            return result
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
-        return try Self.makeResponse(
-            request,
-            data: data,
-            response: httpResponse,
-            configuration: configuration
-        )
     }
 
     /// Sends a page-number-based request while preserving its existing URL.
@@ -448,17 +691,83 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         _ request: R,
         from body: UploadBody
     ) async throws -> HTTPResponse<R.ReturnType> {
-        guard let activityMonitor else {
-            return try await uploadWithoutMonitoring(request, from: body)
+        let telemetryContext = beginTelemetry(.upload)
+        do {
+            let response: HTTPResponse<R.ReturnType>
+            if let activityMonitor {
+                response = try await activityMonitor.track(.upload) {
+                    try await self.uploadWithoutMonitoring(
+                        request,
+                        from: body,
+                        progress: nil,
+                        telemetry: telemetryContext
+                    )
+                }
+            } else {
+                response = try await uploadWithoutMonitoring(
+                    request,
+                    from: body,
+                    progress: nil,
+                    telemetry: telemetryContext
+                )
+            }
+            finishTelemetry(
+                telemetryContext,
+                statusCode: response.statusCode,
+                bytesSent: Self.uploadByteCount(body),
+                bytesReceived: Int64(response.data.count)
+            )
+            return response
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
-        return try await activityMonitor.track(.upload) {
-            try await self.uploadWithoutMonitoring(request, from: body)
+    }
+
+    /// Uploads bytes while reporting opt-in byte and lifecycle progress.
+    public func upload<R: Request>(
+        _ request: R,
+        from body: UploadBody,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> HTTPResponse<R.ReturnType> {
+        let telemetryContext = beginTelemetry(.upload)
+        do {
+            let response: HTTPResponse<R.ReturnType>
+            if let activityMonitor {
+                response = try await activityMonitor.track(.upload) {
+                    try await self.uploadWithoutMonitoring(
+                        request,
+                        from: body,
+                        progress: progress,
+                        telemetry: telemetryContext
+                    )
+                }
+            } else {
+                response = try await uploadWithoutMonitoring(
+                    request,
+                    from: body,
+                    progress: progress,
+                    telemetry: telemetryContext
+                )
+            }
+            finishTelemetry(
+                telemetryContext,
+                statusCode: response.statusCode,
+                bytesSent: Self.uploadByteCount(body),
+                bytesReceived: Int64(response.data.count)
+            )
+            return response
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
     }
 
     private func uploadWithoutMonitoring<R: Request>(
         _ request: R,
-        from body: UploadBody
+        from body: UploadBody,
+        progress: TransferProgressHandler?,
+        telemetry: NetworkTelemetryContext?
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
@@ -466,12 +775,16 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         let configuration = state.withCriticalRegion { $0 }
 
         let bodySource: RequestBodySource
+        let totalBytes: Int64?
         switch body {
         case .data(let data):
             bodySource = .provided(data)
+            totalBytes = Int64(data.count)
         case .file(let fileURL):
-            try await fileIOExecutor.run {
+            totalBytes = try await fileIOExecutor.run {
                 try Self.validateUploadSource(fileURL)
+                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
+                return values.fileSize.map(Int64.init)
             }
             bodySource = .provided(nil)
         }
@@ -482,30 +795,98 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
             bodySource: bodySource
         )
 
+        let attemptState = CriticalState(0)
         let result: (Data, HTTPURLResponse)
-        switch body {
-        case .data(let data):
-            result = try await performDataRequest(
-                urlRequest,
-                acceptedStatusCodes: acceptedStatusCodes,
-                retryPolicy: retryPolicy
-            ) {
-                try await self.urlSession.upload(for: urlRequest, from: data)
-            }
-        case .file(let fileURL):
-            result = try await performDataRequest(
-                urlRequest,
-                acceptedStatusCodes: acceptedStatusCodes,
-                retryPolicy: retryPolicy,
-                beforeRetry: {
-                    try await self.fileIOExecutor.run {
-                        try Self.validateUploadSource(fileURL)
+        do {
+            switch body {
+            case .data(let data):
+                result = try await performDataRequest(
+                    urlRequest,
+                    acceptedStatusCodes: acceptedStatusCodes,
+                    retryPolicy: retryPolicy,
+                    telemetry: telemetry
+                ) {
+                    let attempt = attemptState.withCriticalRegion { value in
+                        value += 1
+                        return value
                     }
+                    progress?(TransferProgress(
+                        operation: .upload,
+                        phase: .started,
+                        bytesCompleted: 0,
+                        totalBytes: totalBytes,
+                        attempt: attempt
+                    ))
+                    let delegate = progress.map {
+                        TransferProgressDelegate(
+                            operation: .upload,
+                            attempt: attempt,
+                            handler: $0
+                        )
+                    }
+                    return try await self.urlSession.upload(
+                        for: urlRequest,
+                        from: data,
+                        delegate: delegate
+                    )
                 }
-            ) {
-                try await self.urlSession.upload(for: urlRequest, fromFile: fileURL)
+            case .file(let fileURL):
+                result = try await performDataRequest(
+                    urlRequest,
+                    acceptedStatusCodes: acceptedStatusCodes,
+                    retryPolicy: retryPolicy,
+                    beforeRetry: {
+                        try await self.fileIOExecutor.run {
+                            try Self.validateUploadSource(fileURL)
+                        }
+                    },
+                    telemetry: telemetry
+                ) {
+                    let attempt = attemptState.withCriticalRegion { value in
+                        value += 1
+                        return value
+                    }
+                    progress?(TransferProgress(
+                        operation: .upload,
+                        phase: .started,
+                        bytesCompleted: 0,
+                        totalBytes: totalBytes,
+                        attempt: attempt
+                    ))
+                    let delegate = progress.map {
+                        TransferProgressDelegate(
+                            operation: .upload,
+                            attempt: attempt,
+                            handler: $0
+                        )
+                    }
+                    return try await self.urlSession.upload(
+                        for: urlRequest,
+                        fromFile: fileURL,
+                        delegate: delegate
+                    )
+                }
             }
+        } catch {
+            progress?(TransferProgress(
+                operation: .upload,
+                phase: Task.isCancelled || error is CancellationError
+                    ? .cancelled
+                    : .failed,
+                bytesCompleted: totalBytes ?? 0,
+                totalBytes: totalBytes,
+                attempt: max(1, attemptState.withCriticalRegion { $0 })
+            ))
+            throw error
         }
+
+        progress?(TransferProgress(
+            operation: .upload,
+            phase: .completed,
+            bytesCompleted: totalBytes ?? 0,
+            totalBytes: totalBytes,
+            attempt: max(1, attemptState.withCriticalRegion { $0 })
+        ))
 
         return try Self.makeResponse(
             request,
@@ -524,17 +905,85 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         _ request: R,
         to destination: DownloadDestination
     ) async throws -> DownloadResponse {
-        guard let activityMonitor else {
-            return try await downloadWithoutMonitoring(request, to: destination)
+        let telemetryContext = beginTelemetry(.download)
+        do {
+            let response: DownloadResponse
+            if let activityMonitor {
+                response = try await activityMonitor.trackCommitted(.download) {
+                    try await self.downloadWithoutMonitoring(
+                        request,
+                        to: destination,
+                        progress: nil,
+                        telemetry: telemetryContext
+                    )
+                }
+            } else {
+                response = try await downloadWithoutMonitoring(
+                    request,
+                    to: destination,
+                    progress: nil,
+                    telemetry: telemetryContext
+                )
+            }
+            finishTelemetry(
+                telemetryContext,
+                statusCode: response.statusCode,
+                bytesReceived: response.value(forHTTPHeaderField: "Content-Length")
+                    .flatMap(Int64.init)
+            )
+            return response
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
-        return try await activityMonitor.trackCommitted(.download) {
-            try await self.downloadWithoutMonitoring(request, to: destination)
+    }
+
+    /// Downloads directly to disk while reporting opt-in byte and lifecycle
+    /// progress. Successful bodies remain file-backed and are never loaded
+    /// into memory.
+    public func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> DownloadResponse {
+        let telemetryContext = beginTelemetry(.download)
+        do {
+            let response: DownloadResponse
+            if let activityMonitor {
+                response = try await activityMonitor.trackCommitted(.download) {
+                    try await self.downloadWithoutMonitoring(
+                        request,
+                        to: destination,
+                        progress: progress,
+                        telemetry: telemetryContext
+                    )
+                }
+            } else {
+                response = try await downloadWithoutMonitoring(
+                    request,
+                    to: destination,
+                    progress: progress,
+                    telemetry: telemetryContext
+                )
+            }
+            finishTelemetry(
+                telemetryContext,
+                statusCode: response.statusCode,
+                bytesReceived: response.value(forHTTPHeaderField: "Content-Length")
+                    .flatMap(Int64.init)
+            )
+            return response
+        } catch {
+            finishTelemetry(telemetryContext, error: error)
+            throw error
         }
     }
 
     private func downloadWithoutMonitoring<R: DownloadRequest>(
         _ request: R,
-        to destination: DownloadDestination
+        to destination: DownloadDestination,
+        progress: TransferProgressHandler?,
+        telemetry: NetworkTelemetryContext?
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
@@ -552,11 +1001,30 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         while true {
             try Task.checkCancellation()
             logger?.log(request: urlRequest)
+            let telemetryAttemptStartedAt = DispatchTime.now().uptimeNanoseconds
+            telemetry?.emit(phase: .attemptStarted, attempt: attempt)
+
+            let progressDelegate = progress.map {
+                TransferProgressDelegate(
+                    operation: .download,
+                    attempt: attempt,
+                    handler: $0
+                )
+            }
+            progress?(TransferProgress(
+                operation: .download,
+                phase: .started,
+                bytesCompleted: 0,
+                attempt: attempt
+            ))
 
             let temporaryURL: URL
             let response: URLResponse
             do {
-                (temporaryURL, response) = try await downloadOperation(urlRequest)
+                (temporaryURL, response) = try await downloadOperationWithDelegate(
+                    urlRequest,
+                    progressDelegate
+                )
             } catch {
                 let networkError = try Self.mappedTransportError(error)
                 try Task.checkCancellation()
@@ -575,6 +1043,15 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
                 }
                 try Task.checkCancellation()
                 guard let delay = retryDelay else {
+                    progress?(TransferProgress(
+                        operation: .download,
+                        phase: Task.isCancelled || error is CancellationError
+                            ? .cancelled
+                            : .failed,
+                        bytesCompleted: progressDelegate?.latest.bytesCompleted ?? 0,
+                        totalBytes: progressDelegate?.latest.totalBytes,
+                        attempt: attempt
+                    ))
                     throw networkError
                 }
                 logger?.logRetry(
@@ -599,6 +1076,15 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
 
                 guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
                     try Task.checkCancellation()
+                    telemetry?.emit(
+                        phase: .attemptFailed,
+                        attempt: attempt,
+                        statusCode: httpResponse.statusCode,
+                        errorKind: .httpStatus,
+                        durationNanoseconds: telemetry?.attemptElapsed(
+                            since: telemetryAttemptStartedAt
+                        )
+                    )
                     let metadataOnlyFailure = Self.makeHTTPFailure(
                         response: httpResponse,
                         data: nil
@@ -643,10 +1129,32 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
 
                 logger?.log(response: response, data: Data())
                 try Task.checkCancellation()
+                telemetry?.emit(
+                    phase: .attemptCompleted,
+                    attempt: attempt,
+                    statusCode: httpResponse.statusCode,
+                    bytesReceived: httpResponse.expectedContentLength >= 0
+                        ? httpResponse.expectedContentLength
+                        : nil,
+                    durationNanoseconds: telemetry?.attemptElapsed(
+                        since: telemetryAttemptStartedAt
+                    )
+                )
             } catch {
                 if ownsTemporaryFile {
                     await discardDownloadedFile(at: temporaryURL)
                 }
+                progress?(TransferProgress(
+                    operation: .download,
+                    phase: Task.isCancelled || error is CancellationError
+                        ? .cancelled
+                        : .failed,
+                    bytesCompleted: progressDelegate?.latest.bytesCompleted ?? 0,
+                    totalBytes: response.expectedContentLength >= 0
+                        ? response.expectedContentLength
+                        : progressDelegate?.latest.totalBytes,
+                    attempt: attempt
+                ))
                 try Task.checkCancellation()
                 throw error
             }
@@ -661,14 +1169,52 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
                 }
             } catch is CancellationError {
                 await discardDownloadedFile(at: temporaryURL)
+                progress?(TransferProgress(
+                    operation: .download,
+                    phase: .cancelled,
+                    bytesCompleted: progressDelegate?.latest.bytesCompleted ?? 0,
+                    totalBytes: progressDelegate?.latest.totalBytes,
+                    attempt: attempt
+                ))
                 throw CancellationError()
             } catch let error as NetworkError {
                 await discardDownloadedFile(at: temporaryURL)
+                progress?(TransferProgress(
+                    operation: .download,
+                    phase: .failed,
+                    bytesCompleted: progressDelegate?.latest.bytesCompleted ?? 0,
+                    totalBytes: progressDelegate?.latest.totalBytes,
+                    attempt: attempt
+                ))
                 throw error
             } catch {
                 await discardDownloadedFile(at: temporaryURL)
+                progress?(TransferProgress(
+                    operation: .download,
+                    phase: Task.isCancelled || error is CancellationError
+                        ? .cancelled
+                        : .failed,
+                    bytesCompleted: progressDelegate?.latest.bytesCompleted ?? 0,
+                    totalBytes: progressDelegate?.latest.totalBytes,
+                    attempt: attempt
+                ))
                 throw NetworkError.fileOperationFailed(error)
             }
+
+            let latestProgress = progressDelegate?.latest
+            let totalBytes = httpResponse.expectedContentLength >= 0
+                ? httpResponse.expectedContentLength
+                : latestProgress?.totalBytes
+            progress?(TransferProgress(
+                operation: .download,
+                phase: .completed,
+                bytesCompleted: max(
+                    latestProgress?.bytesCompleted ?? 0,
+                    totalBytes ?? 0
+                ),
+                totalBytes: totalBytes,
+                attempt: attempt
+            ))
 
             return DownloadResponse(
                 fileURL: storedURL,
@@ -737,12 +1283,15 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
         acceptedStatusCodes: HTTPStatusPolicy,
         retryPolicy: HTTPRetryPolicy,
         beforeRetry: (@Sendable () async throws -> Void)? = nil,
+        telemetry: NetworkTelemetryContext? = nil,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
         if retryPolicy.isNever {
             return try await performDataAttempt(
                 urlRequest,
                 acceptedStatusCodes: acceptedStatusCodes,
+                attempt: 1,
+                telemetry: telemetry,
                 operation: operation
             )
         }
@@ -753,6 +1302,8 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
                 return try await performDataAttempt(
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
+                    attempt: attempt,
+                    telemetry: telemetry,
                     operation: operation
                 )
             } catch let error as NetworkError {
@@ -795,34 +1346,66 @@ public final class APIClient: APIClientTransferProtocol, APIClientStreamingProto
     private func performDataAttempt(
         _ urlRequest: URLRequest,
         acceptedStatusCodes: HTTPStatusPolicy,
+        attempt: Int,
+        telemetry: NetworkTelemetryContext?,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         logger?.log(request: urlRequest)
-
-        let data: Data
-        let response: URLResponse
+        let attemptStartedAt = DispatchTime.now().uptimeNanoseconds
+        telemetry?.emit(phase: .attemptStarted, attempt: attempt)
+        var statusCode: Int?
+        var bytesReceived: Int64?
         do {
-            (data, response) = try await operation()
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await operation()
+            } catch {
+                throw try Self.mappedTransportError(error)
+            }
+
+            try Task.checkCancellation()
+            bytesReceived = Int64(data.count)
+            logger?.log(response: response, data: data)
+            try Task.checkCancellation()
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NetworkError.invalidResponse
+            }
+            statusCode = httpResponse.statusCode
+            guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+                throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                    response: httpResponse,
+                    data: data
+                ))
+            }
+
+            telemetry?.emit(
+                phase: .attemptCompleted,
+                attempt: attempt,
+                statusCode: httpResponse.statusCode,
+                bytesReceived: bytesReceived,
+                durationNanoseconds: telemetry?.attemptElapsed(
+                    since: attemptStartedAt
+                )
+            )
+            return (data, httpResponse)
         } catch {
-            throw try Self.mappedTransportError(error)
+            telemetry?.emit(
+                phase: .attemptFailed,
+                attempt: attempt,
+                statusCode: statusCode,
+                bytesReceived: bytesReceived,
+                errorKind: error is CancellationError
+                    ? nil
+                    : networkTelemetryErrorKind(error),
+                durationNanoseconds: telemetry?.attemptElapsed(
+                    since: attemptStartedAt
+                )
+            )
+            throw error
         }
-
-        try Task.checkCancellation()
-        logger?.log(response: response, data: data)
-        try Task.checkCancellation()
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NetworkError.invalidResponse
-        }
-        guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
-            throw NetworkError.requestFailed(Self.makeHTTPFailure(
-                response: httpResponse,
-                data: data
-            ))
-        }
-
-        return (data, httpResponse)
     }
 
     private func waitBeforeRetry(_ nanoseconds: UInt64) async throws {

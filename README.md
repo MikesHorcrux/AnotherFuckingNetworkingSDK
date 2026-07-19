@@ -2,6 +2,10 @@
 
 A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, replay-safe opt-in retries, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
 
+For detailed adoption, architecture, lifecycle, security, and release guidance,
+see the [documentation hub](docs/README.md). Repository-specific agent
+implementation rules live in [skills/afn-networking-sdk](skills/afn-networking-sdk/SKILL.md).
+
 ## Requirements
 
 - Swift 6.0 or newer
@@ -453,7 +457,42 @@ errors trigger a best-effort discard of Foundation's owned temporary file
 without replacing the primary operation error. After a successful return,
 destination ownership and cleanup belong to the caller.
 
-These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
+Opt into byte and lifecycle progress through `APIClientTransferProgressProtocol`:
+
+```swift
+let response = try await client.upload(
+    UploadRequest(),
+    from: .file(fileURL),
+    progress: { event in
+        print(event.phase, event.bytesCompleted, event.fractionCompleted as Any)
+    }
+)
+```
+
+Progress events are `Sendable`, bounded, and include the operation, phase,
+attempt number, completed bytes, and an optional known total. The callback must
+remain lightweight because URLSession invokes it on its delegate context. The
+default transfer APIs do no progress work.
+
+For queue state that must survive relaunch, persist `TransferJob` records with
+`JSONTransferJobStore` and coordinate execution through
+`TransferJobCoordinator`. The coordinator records queued, running, paused,
+failed, and committed states without creating a second URLSession stack:
+
+```swift
+let coordinator = TransferJobCoordinator(
+    store: JSONTransferJobStore(fileURL: jobsURL)
+)
+try await coordinator.restore()
+try await coordinator.enqueue(
+    TransferJob(kind: .download, requestKey: "export-42")
+)
+```
+
+The operation closure resolves `requestKey` and bridges to an app-owned
+background URLSession adapter. It can persist bounded resume data at each
+checkpoint. System background delegate rebinding and completion handlers remain
+platform-specific; see [Background and resumable transfers](docs/background-transfers.md).
 
 ## WebSockets
 
@@ -692,6 +731,29 @@ func makeActivityModel(
 Only the small presentation adapter runs on the main actor. URL construction,
 encoding, URLSession work, logging, and decoding remain outside it.
 
+## Telemetry and metrics
+
+Telemetry is separate from logging and opt-in. Events contain operation and
+attempt IDs, durations, status codes, bounded byte counts, and coarse error
+categories—never URLs, headers, bodies, tokens, or localized error strings:
+
+```swift
+let telemetry = NetworkTelemetry { event in
+    metricsActor.record(event)
+}
+
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    telemetry: telemetry
+)
+```
+
+`NetworkTelemetryExporter` provides a vendor-neutral bridge for OpenTelemetry
+or another metrics system. Keep exporters lightweight and enqueue work to an
+actor; delivery is synchronous and the default client has no telemetry cost.
+Stream completion is recorded at EOF, cancellation, failure, or deallocation,
+not when headers first arrive. See [Telemetry and metrics](docs/telemetry.md).
+
 ## Safe request logging
 
 Logging is disabled unless a logger is passed to the client.
@@ -745,6 +807,10 @@ struct UserService: Sendable {
 Use `any APIClientResponseProtocol` instead when the service calls `sendResponse(_:)` or `sendPageResponse(_:)`. Both `APIClient` and `MockAPIClient` conform.
 
 Services that upload or download can depend on `any APIClientTransferProtocol`.
+Streaming services can depend on `any APIClientStreamingProtocol`; services
+that expose transfer progress can use `any APIClientTransferProgressProtocol`.
+`AuthenticatedAPIClient` conditionally preserves the progress protocol when
+its base client supports it.
 
 ## Testing support
 
@@ -827,6 +893,24 @@ so it deliberately does not execute a request's retry policy. Retry policy is
 excluded from exact wire identity and recordings, and explicit mock failures
 remain authoritative. Test fail-then-success transport behavior with
 `APIClient` and an isolated `URLProtocol` handler.
+
+Streaming mocks are finite and memory-backed, so they are deterministic without
+opening a socket:
+
+```swift
+await mock.stubStream(GetUserRequest.self, data: Data("chunk".utf8))
+let streaming: any APIClientStreamingProtocol = mock
+let stream = try await streaming.stream(GetUserRequest(id: 42))
+for try await byte in stream {
+    consume(byte)
+}
+```
+
+The same type-wide stream and response stubs work through
+`AuthenticatedAPIClient`; the mock records the injected bearer header while
+still matching the underlying request type. Exact stubs continue to match the
+fully decorated request and therefore remain the right choice when headers or
+bodies are part of the assertion.
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 

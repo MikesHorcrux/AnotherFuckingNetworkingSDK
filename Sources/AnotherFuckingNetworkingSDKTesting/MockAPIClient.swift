@@ -5,6 +5,7 @@ import AnotherFuckingNetworkingSDK
 public enum MockRequestOperation: String, Equatable, Sendable {
     case request
     case page
+    case stream
 }
 
 /// A structured, concurrency-safe record of a mock client invocation.
@@ -161,13 +162,16 @@ public enum MockTransferError: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// A deterministic, actor-isolated test double for ``APIClientProtocol``.
+/// A deterministic, actor-isolated test double for the SDK's request,
+/// streaming, and transfer protocols.
 ///
 /// Exact request stubs take precedence over type-wide defaults. Request and
 /// page operations have separate registries, and missing stubs always throw.
-/// Transfer stubs use another independent registry and never read, create,
-/// move, replace, or remove files.
-public actor MockAPIClient: APIClientTransferProtocol {
+/// Stream stubs are finite in-memory byte sequences. Transfer stubs use
+/// another independent registry and never read, create, move, replace, or
+/// remove files. Type-wide stubs also match generic forwarding decorators such
+/// as ``AuthenticatedAPIClient`` while exact stubs remain concrete.
+public actor MockAPIClient: APIClientTransferProgressProtocol, APIClientStreamingProtocol {
     public typealias Sleeper = @Sendable (UInt64) async throws -> Void
     public typealias DownloadFactory = @Sendable (
         RecordedTransfer
@@ -314,6 +318,32 @@ public actor MockAPIClient: APIClientTransferProtocol {
         )
     }
 
+    /// Registers a finite byte stream for every request of the supplied type.
+    /// The mock stream is intentionally in-memory and finite; production
+    /// streaming behavior remains covered by URLSession transport tests.
+    public func stubStream<R: HTTPRequest>(
+        _ requestType: R.Type,
+        data: Data,
+        metadata: HTTPResponseMetadata = HTTPResponseMetadata(statusCode: 200)
+    ) {
+        stubs[.type(requestType, operation: .stream)] = .stream(
+            data,
+            metadata
+        )
+    }
+
+    /// Registers a finite byte stream for one fully constructed request.
+    public func stubStream<R: HTTPRequest>(
+        _ request: R,
+        data: Data,
+        metadata: HTTPResponseMetadata = HTTPResponseMetadata(statusCode: 200)
+    ) throws {
+        stubs[try exactKey(for: request, operation: .stream)] = .stream(
+            data,
+            metadata
+        )
+    }
+
     // MARK: Failure stubs
 
     public func stubError<R: Request>(
@@ -342,6 +372,22 @@ public actor MockAPIClient: APIClientTransferProtocol {
         error: any Error
     ) throws {
         stubs[try exactKey(for: request, operation: .page)] = .failure(error)
+    }
+
+    /// Registers a stream failure for every request of the supplied type.
+    public func stubStreamError<R: HTTPRequest>(
+        _ requestType: R.Type,
+        error: any Error
+    ) {
+        stubs[.type(requestType, operation: .stream)] = .failure(error)
+    }
+
+    /// Registers a stream failure for one fully constructed request.
+    public func stubStreamError<R: HTTPRequest>(
+        _ request: R,
+        error: any Error
+    ) throws {
+        stubs[try exactKey(for: request, operation: .stream)] = .failure(error)
     }
 
     // MARK: Upload stubs
@@ -578,6 +624,43 @@ public actor MockAPIClient: APIClientTransferProtocol {
             )
         case .failure(let error):
             throw error
+        case .stream:
+            throw MockAPIClientError.responseTypeMismatch(invocation)
+        }
+    }
+
+    // MARK: APIClientStreamingProtocol
+
+    public func stream<R: HTTPRequest>(
+        _ request: R
+    ) async throws -> HTTPByteStream {
+        try Task.checkCancellation()
+        let context = try makeContext(for: request, operation: .stream)
+        let invocation = record(request, operation: .stream, context: context)
+        let resolvedStub = resolve(
+            R.self,
+            operation: .stream,
+            signature: context.signature
+        )
+
+        try await wait(delayNanoseconds)
+
+        guard let resolvedStub else {
+            throw MockAPIClientError.missingStub(invocation)
+        }
+
+        switch resolvedStub {
+        case .stream(let data, let metadata):
+            try Self.validateStatus(
+                metadata,
+                data: data,
+                acceptedStatusCodes: request.acceptedStatusCodes
+            )
+            return HTTPByteStream(data: data, metadata: metadata)
+        case .failure(let error):
+            throw error
+        case .success:
+            throw MockAPIClientError.responseTypeMismatch(invocation)
         }
     }
 
@@ -628,6 +711,8 @@ public actor MockAPIClient: APIClientTransferProtocol {
             )
         case .failure(let error):
             throw error
+        case .stream:
+            throw MockAPIClientError.responseTypeMismatch(invocation)
         }
     }
 
@@ -677,6 +762,46 @@ public actor MockAPIClient: APIClientTransferProtocol {
             throw error
         case .downloadResponse, .downloadFactory:
             throw MockTransferError.responseTypeMismatch(invocation)
+        }
+    }
+
+    public func upload<R: Request>(
+        _ request: R,
+        from body: UploadBody,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> HTTPResponse<R.ReturnType> {
+        let totalBytes: Int64?
+        switch body {
+        case .data(let data):
+            totalBytes = Int64(data.count)
+        case .file:
+            totalBytes = nil
+        }
+        progress(TransferProgress(
+            operation: .upload,
+            phase: .started,
+            bytesCompleted: 0,
+            totalBytes: totalBytes
+        ))
+        do {
+            let response = try await upload(request, from: body)
+            progress(TransferProgress(
+                operation: .upload,
+                phase: .completed,
+                bytesCompleted: totalBytes ?? 0,
+                totalBytes: totalBytes
+            ))
+            return response
+        } catch {
+            progress(TransferProgress(
+                operation: .upload,
+                phase: Task.isCancelled || error is CancellationError
+                    ? .cancelled
+                    : .failed,
+                bytesCompleted: 0,
+                totalBytes: totalBytes
+            ))
+            throw error
         }
     }
 
@@ -741,6 +866,39 @@ public actor MockAPIClient: APIClientTransferProtocol {
         }
     }
 
+    public func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination,
+        progress: @escaping TransferProgressHandler
+    ) async throws -> DownloadResponse {
+        progress(TransferProgress(
+            operation: .download,
+            phase: .started,
+            bytesCompleted: 0
+        ))
+        do {
+            let response = try await download(request, to: destination)
+            let totalBytes = response.value(forHTTPHeaderField: "Content-Length")
+                .flatMap(Int64.init)
+            progress(TransferProgress(
+                operation: .download,
+                phase: .completed,
+                bytesCompleted: totalBytes ?? 0,
+                totalBytes: totalBytes
+            ))
+            return response
+        } catch {
+            progress(TransferProgress(
+                operation: .download,
+                phase: Task.isCancelled || error is CancellationError
+                    ? .cancelled
+                    : .failed,
+                bytesCompleted: 0
+            ))
+            throw error
+        }
+    }
+
     private func wait(_ nanoseconds: UInt64) async throws {
         try Task.checkCancellation()
         if nanoseconds > 0 {
@@ -749,16 +907,24 @@ public actor MockAPIClient: APIClientTransferProtocol {
         try Task.checkCancellation()
     }
 
-    private func resolve<R: Request>(
+    private func resolve<R: HTTPRequest>(
         _ requestType: R.Type,
         operation: MockRequestOperation,
         signature: Signature
     ) -> Stub? {
         stubs[.exact(requestType, operation: operation, signature: signature)]
             ?? stubs[.type(requestType, operation: operation)]
+            ?? stubs.first { key, _ in
+                key.operation == operation
+                    && key.signature == nil
+                    && Self.isWrappedRequestType(
+                        registered: key.requestTypeName,
+                        requested: String(reflecting: requestType)
+                    )
+            }?.value
     }
 
-    private func exactKey<R: Request>(
+    private func exactKey<R: HTTPRequest>(
         for request: R,
         operation: MockRequestOperation
     ) throws -> StubKey {
@@ -775,7 +941,16 @@ public actor MockAPIClient: APIClientTransferProtocol {
             requestType,
             kind: kind,
             signature: signature
-        )] ?? transferStubs[.type(requestType, kind: kind)]
+        )]
+            ?? transferStubs[.type(requestType, kind: kind)]
+            ?? transferStubs.first { key, _ in
+                key.kind == kind
+                    && key.signature == nil
+                    && Self.isWrappedRequestType(
+                        registered: key.requestTypeName,
+                        requested: String(reflecting: requestType)
+                    )
+            }?.value
     }
 
     private func exactTransferKey<R: HTTPRequest>(
@@ -864,7 +1039,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         )
     }
 
-    private func makeContext<R: Request>(
+    private func makeContext<R: HTTPRequest>(
         for request: R,
         operation: MockRequestOperation
     ) throws -> RequestContext {
@@ -910,7 +1085,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
         )
     }
 
-    private func finalURL<R: Request>(
+    private func finalURL<R: HTTPRequest>(
         for request: R,
         operation: MockRequestOperation
     ) -> URL? {
@@ -945,7 +1120,7 @@ public actor MockAPIClient: APIClientTransferProtocol {
     }
 
     @discardableResult
-    private func record<R: Request>(
+    private func record<R: HTTPRequest>(
         _ request: R,
         operation: MockRequestOperation,
         context: RequestContext
@@ -1023,6 +1198,17 @@ public actor MockAPIClient: APIClientTransferProtocol {
         return result
     }
 
+    /// Decorators commonly wrap a request in a generic forwarding type (for
+    /// example, the authenticated façade). Type-wide stubs continue to match
+    /// that underlying request while exact stubs remain concrete.
+    private static func isWrappedRequestType(
+        registered: String,
+        requested: String
+    ) -> Bool {
+        guard registered != requested else { return false }
+        return requested.contains("<\(registered)>")
+    }
+
     private static func validateStatus(
         _ metadata: HTTPResponseMetadata,
         data: Data?,
@@ -1051,6 +1237,7 @@ private extension MockAPIClient {
             data: Data,
             metadata: HTTPResponseMetadata?
         )
+        case stream(Data, HTTPResponseMetadata)
         case failure(any Error)
     }
 
@@ -1083,20 +1270,22 @@ private extension MockAPIClient {
     struct StubKey: Hashable, Sendable {
         let operation: MockRequestOperation
         let requestType: ObjectIdentifier
+        let requestTypeName: String
         let signature: Signature?
 
-        static func type<R: Request>(
+        static func type<R: HTTPRequest>(
             _ requestType: R.Type,
             operation: MockRequestOperation
         ) -> Self {
             Self(
                 operation: operation,
                 requestType: ObjectIdentifier(requestType),
+                requestTypeName: String(reflecting: requestType),
                 signature: nil
             )
         }
 
-        static func exact<R: Request>(
+        static func exact<R: HTTPRequest>(
             _ requestType: R.Type,
             operation: MockRequestOperation,
             signature: Signature
@@ -1104,6 +1293,7 @@ private extension MockAPIClient {
             Self(
                 operation: operation,
                 requestType: ObjectIdentifier(requestType),
+                requestTypeName: String(reflecting: requestType),
                 signature: signature
             )
         }
@@ -1112,6 +1302,7 @@ private extension MockAPIClient {
     struct TransferStubKey: Hashable, Sendable {
         let kind: TransferKind
         let requestType: ObjectIdentifier
+        let requestTypeName: String
         let signature: TransferSignature?
 
         static func type<R: HTTPRequest>(
@@ -1121,6 +1312,7 @@ private extension MockAPIClient {
             Self(
                 kind: kind,
                 requestType: ObjectIdentifier(requestType),
+                requestTypeName: String(reflecting: requestType),
                 signature: nil
             )
         }
@@ -1133,6 +1325,7 @@ private extension MockAPIClient {
             Self(
                 kind: kind,
                 requestType: ObjectIdentifier(requestType),
+                requestTypeName: String(reflecting: requestType),
                 signature: signature
             )
         }
@@ -1146,7 +1339,7 @@ private extension MockAPIClient {
         let page: Int?
         let pageSize: Int?
 
-        init<R: Request>(_ request: R, urlRequest: URLRequest) {
+        init<R: HTTPRequest>(_ request: R, urlRequest: URLRequest) {
             method = urlRequest.httpMethod
             url = urlRequest.url?.absoluteString ?? ""
             headers = (urlRequest.allHTTPHeaderFields ?? [:])

@@ -9,6 +9,58 @@ public enum UploadBody: Equatable, Sendable {
     case file(URL)
 }
 
+/// The direction of a file transfer progress event.
+public enum TransferProgressOperation: String, Equatable, Sendable {
+    case upload
+    case download
+}
+
+/// The lifecycle phase represented by a transfer progress event.
+public enum TransferProgressPhase: String, Equatable, Sendable {
+    case started
+    case running
+    case completed
+    case failed
+    case cancelled
+}
+
+/// A bounded, Sendable progress value for an upload or download attempt.
+public struct TransferProgress: Equatable, Sendable {
+    public let operation: TransferProgressOperation
+    public let phase: TransferProgressPhase
+    public let bytesCompleted: Int64
+    public let totalBytes: Int64?
+    public let attempt: Int
+
+    public init(
+        operation: TransferProgressOperation,
+        phase: TransferProgressPhase,
+        bytesCompleted: Int64,
+        totalBytes: Int64? = nil,
+        attempt: Int = 1
+    ) {
+        self.operation = operation
+        self.phase = phase
+        self.bytesCompleted = max(0, bytesCompleted)
+        self.totalBytes = totalBytes.flatMap { $0 >= 0 ? $0 : nil }
+        self.attempt = max(1, attempt)
+    }
+
+    /// A fraction in `0...1` when the server supplied a known total.
+    public var fractionCompleted: Double? {
+        guard let totalBytes, totalBytes > 0 else {
+            return totalBytes == 0 ? 1 : nil
+        }
+        return min(1, max(0, Double(bytesCompleted) / Double(totalBytes)))
+    }
+}
+
+/// A lightweight callback used by the opt-in transfer progress APIs.
+///
+/// Handlers run on URLSession's callback context and should do minimal work.
+/// Move expensive UI or persistence work to the caller's own actor/task.
+public typealias TransferProgressHandler = @Sendable (TransferProgress) -> Void
+
 /// A type-safe description of an HTTP operation that downloads to disk.
 public protocol DownloadRequest: HTTPRequest {}
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AFN Networking SDK"
+  short_description: "Build and review Swift networking clients"
+  default_prompt: "Use $afn-networking-sdk to implement or review a Swift networking feature with concurrency, lifecycle, and testability gates."
