@@ -60,8 +60,9 @@ source and tests before relying on any example below.
   snapshot initializer without retaining URL or payload data.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
-- Response caching: `CachedAPIClient` and `ResponseCachePolicy`; bounded
-  caller-keyed TTL/LRU storage with explicit invalidation.
+- Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and
+  `ResponseCachePolicy`; bounded caller-keyed TTL/LRU storage, optional
+  validator revalidation, and explicit invalidation.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
@@ -122,10 +123,12 @@ single-flight only, not a response cache.
 
 ### Response caching
 
-Use `CachedAPIClient` only for explicitly cacheable successful reads. Include
-request type, URL inputs, auth scope, locale, and feature flags in the key;
-invalidate after successful writes. Treat conditional validators and `304`
-handling as application policy until the dedicated adapter lands.
+Use `CachedAPIClient` or `ConditionalCachedAPIClient` only for explicitly
+cacheable successful reads. Include request type, URL inputs, auth scope,
+locale, and feature flags in the key; invalidate after successful writes.
+Conditional caching retains only bounded `ETag`/`Last-Modified` values and
+refreshes stale entries on `304`, while pagination methods remain forwarded
+unless you call `sendResponse(_:)` explicitly.
 
 ### Tests and release gates
 

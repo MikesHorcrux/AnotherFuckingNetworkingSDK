@@ -234,6 +234,10 @@ invalidates mutations implicitly; call `invalidate(_:)` after a write. See
 [Response caching](docs/response-caching.md) for composition and validator
 guidance.
 
+When the server supplies validators, `ConditionalCachedAPIClient` revalidates
+stale entries with bounded `ETag`/`Last-Modified` headers and turns `304 Not
+Modified` into a typed cache hit while preserving the original response value.
+
 ## Streaming HTTP responses
 
 Use `stream(_:)` when a response is large, long-lived, or naturally consumed

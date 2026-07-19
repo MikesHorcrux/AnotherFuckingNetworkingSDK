@@ -28,10 +28,18 @@ public struct ResponseCachePolicy: Equatable, Sendable {
     }
 }
 
+private struct ResponseCacheValidator: Equatable, Sendable {
+    let headerName: String
+    let value: String
+}
+
+private let maximumResponseCacheValidatorBytes = 1_024
+
 private struct CachedResponse: @unchecked Sendable {
     let response: Any
     let byteCount: Int64
-    let expiresAt: Date?
+    var expiresAt: Date?
+    let validator: ResponseCacheValidator?
     var lastAccess: UInt64
 }
 
@@ -45,8 +53,22 @@ private actor ResponseCacheStorage {
         as type: HTTPResponse<Value>.Type,
         now: Date
     ) -> HTTPResponse<Value>? {
+        entry(for: key, as: type, now: now)?.response
+    }
+
+    func entry<Value: Sendable>(
+        for key: String,
+        as type: HTTPResponse<Value>.Type,
+        now: Date,
+        removeExpired: Bool = true
+    ) -> (
+        response: HTTPResponse<Value>,
+        validator: ResponseCacheValidator?,
+        isFresh: Bool
+    )? {
         guard var entry = entries[key] else { return nil }
-        if let expiresAt = entry.expiresAt, expiresAt <= now {
+        let isExpired = entry.expiresAt.map { $0 <= now } ?? false
+        if isExpired, removeExpired {
             remove(key)
             return nil
         }
@@ -57,14 +79,15 @@ private actor ResponseCacheStorage {
         accessSequence &+= 1
         entry.lastAccess = accessSequence
         entries[key] = entry
-        return response
+        return (response, entry.validator, !isExpired)
     }
 
     func insert<Value: Sendable>(
         _ response: HTTPResponse<Value>,
         for key: String,
         policy: ResponseCachePolicy,
-        now: Date
+        now: Date,
+        validator: ResponseCacheValidator? = nil
     ) {
         guard policy.isEnabled else { return }
         let byteCount = max(1, Int64(response.data.count))
@@ -81,6 +104,7 @@ private actor ResponseCacheStorage {
             expiresAt: policy.timeToLive.map {
                 now.addingTimeInterval($0)
             },
+            validator: validator,
             lastAccess: accessSequence
         )
         totalBytes += byteCount
@@ -89,6 +113,20 @@ private actor ResponseCacheStorage {
 
     func invalidate(_ key: String) {
         remove(key)
+    }
+
+    func refresh(
+        _ key: String,
+        policy: ResponseCachePolicy,
+        now: Date
+    ) {
+        guard var entry = entries[key] else { return }
+        entry.expiresAt = policy.timeToLive.map {
+            now.addingTimeInterval($0)
+        }
+        accessSequence &+= 1
+        entry.lastAccess = accessSequence
+        entries[key] = entry
     }
 
     func removeAll() {
@@ -109,6 +147,204 @@ private actor ResponseCacheStorage {
         if let entry = entries.removeValue(forKey: key) {
             totalBytes -= entry.byteCount
         }
+    }
+}
+
+private struct ConditionalResponseNotModified: Error, Sendable {}
+
+private struct ConditionalValidationRequest<Base: Request>: Request {
+    typealias ReturnType = Base.ReturnType
+
+    let base: Base
+    let validator: ResponseCacheValidator
+
+    var path: String { base.path }
+    var pathEncoding: RequestPathEncoding { base.pathEncoding }
+    var method: HTTPMethod { base.method }
+    var queryItems: [URLQueryItem]? { base.queryItems }
+    var body: Data? { base.body }
+    var headers: [String: String]? { base.headers }
+    var acceptedStatusCodes: HTTPStatusPolicy {
+        base.acceptedStatusCodes.including(304)
+    }
+    var retryPolicy: HTTPRetryPolicy { base.retryPolicy }
+    var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
+        base.authenticationReplaySafety
+    }
+    var allowsEmptyResponseBody: Bool { true }
+
+    func makeURL(baseURL: URL) -> URL? {
+        base.makeURL(baseURL: baseURL)
+    }
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        try base.makeBody(using: encoder)
+    }
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        try base.customize(&urlRequest)
+        urlRequest.setValue(
+            validator.value,
+            forHTTPHeaderField: validator.headerName
+        )
+    }
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> Base.ReturnType {
+        if response.statusCode == 304 {
+            throw ConditionalResponseNotModified()
+        }
+        return try base.decode(data, response: response, using: decoder)
+    }
+}
+
+/// A bounded response cache that revalidates stale entries with HTTP
+/// validators before downloading the full response again.
+///
+/// Requests are keyed by the caller, just like ``CachedAPIClient``. A fresh
+/// entry is returned without a network request. Once stale, the decorator
+/// sends `If-None-Match` for an `ETag` validator or `If-Modified-Since` for a
+/// `Last-Modified` validator. A `304 Not Modified` response returns the
+/// previously decoded value and refreshes its TTL. Pagination methods are
+/// forwarded unchanged; use ``sendResponse(_:)`` when caching a paginated
+/// request explicitly.
+public struct ConditionalCachedAPIClient<BaseClient: APIClientResponseProtocol>:
+    APIClientResponseProtocol,
+    Sendable {
+    public typealias KeyProvider = @Sendable (any HTTPRequest) -> String?
+    public typealias NowProvider = @Sendable () -> Date
+
+    private let baseClient: BaseClient
+    private let keyProvider: KeyProvider
+    private let policy: ResponseCachePolicy
+    private let now: NowProvider
+    private let storage: ResponseCacheStorage
+
+    public init(
+        client: BaseClient,
+        policy: ResponseCachePolicy = .init(),
+        keyProvider: @escaping KeyProvider,
+        now: @escaping NowProvider = { Date() }
+    ) {
+        baseClient = client
+        self.policy = policy
+        self.keyProvider = keyProvider
+        self.now = now
+        storage = ResponseCacheStorage()
+    }
+
+    public func invalidate(_ key: String) async {
+        await storage.invalidate(key)
+    }
+
+    public func removeAllCachedResponses() async {
+        await storage.removeAll()
+    }
+
+    public func send<R: Request>(_ request: R) async throws -> R.ReturnType {
+        try await sendResponse(request).value
+    }
+
+    public func sendResponse<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType> {
+        try Task.checkCancellation()
+        guard policy.isEnabled, let key = keyProvider(request) else {
+            return try await baseClient.sendResponse(request)
+        }
+
+        if let cached = await storage.entry(
+            for: key,
+            as: HTTPResponse<R.ReturnType>.self,
+            now: now(),
+            removeExpired: false
+        ) {
+            if cached.isFresh {
+                return cached.response
+            }
+
+            guard let validator = cached.validator else {
+                let response = try await baseClient.sendResponse(request)
+                await storage.insert(
+                    response,
+                    for: key,
+                    policy: policy,
+                    now: now(),
+                    validator: Self.validator(from: response)
+                )
+                return response
+            }
+
+            let conditional = ConditionalValidationRequest(
+                base: request,
+                validator: validator
+            )
+            do {
+                let response = try await baseClient.sendResponse(conditional)
+                if response.statusCode == 304 {
+                    await storage.refresh(key, policy: policy, now: now())
+                    return cached.response
+                }
+                await storage.insert(
+                    response,
+                    for: key,
+                    policy: policy,
+                    now: now(),
+                    validator: Self.validator(from: response)
+                )
+                return response
+            } catch let error as NetworkError {
+                guard case .decodingFailed(let underlying) = error,
+                      underlying is ConditionalResponseNotModified else {
+                    throw error
+                }
+                await storage.refresh(key, policy: policy, now: now())
+                return cached.response
+            }
+        }
+
+        let response = try await baseClient.sendResponse(request)
+        await storage.insert(
+            response,
+            for: key,
+            policy: policy,
+            now: now(),
+            validator: Self.validator(from: response)
+        )
+        return response
+    }
+
+    public func sendPage<R: PaginatedRequest>(
+        _ request: R
+    ) async throws -> PaginatedResponse<R.ReturnType> {
+        try await baseClient.sendPage(request)
+    }
+
+    public func sendPageResponse<R: PaginatedRequest>(
+        _ request: R
+    ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>> {
+        try await baseClient.sendPageResponse(request)
+    }
+
+    private static func validator<Value: Sendable>(
+        from response: HTTPResponse<Value>
+    ) -> ResponseCacheValidator? {
+        let candidates = [
+            ("If-None-Match", response.value(forHTTPHeaderField: "ETag")),
+            ("If-Modified-Since", response.value(forHTTPHeaderField: "Last-Modified"))
+        ]
+        for (headerName, value) in candidates {
+            guard let value,
+                  !value.isEmpty,
+                  value.utf8.count <= maximumResponseCacheValidatorBytes else {
+                continue
+            }
+            return ResponseCacheValidator(headerName: headerName, value: value)
+        }
+        return nil
     }
 }
 

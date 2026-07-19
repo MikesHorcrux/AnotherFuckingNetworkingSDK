@@ -24,6 +24,8 @@ roadmap item is not a shipped feature.
 - Opt-in WebSocket reconnect, bounded backoff, heartbeat, and session-restorer
   policies.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
+- Validator-aware conditional caching with bounded `ETag`/
+  `Last-Modified` revalidation.
 
 ## Next production modules
 
@@ -37,10 +39,7 @@ roadmap item is not a shipped feature.
    oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
    adapters and oldest-target integration coverage.
-5. **Conditional caching** — validator-aware `If-None-Match`/`304` adapters.
-   Bounded response caching and request coalescing are shipped as opt-in
-   decorators without application-wide cache semantics.
-6. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
+5. **Platform matrix** — oldest-target builds plus tvOS, watchOS, visionOS, and
    Catalyst evaluation.
 
 ## Deliberate non-goals
