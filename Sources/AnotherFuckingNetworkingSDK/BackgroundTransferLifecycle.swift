@@ -249,6 +249,7 @@ public extension BackgroundTransferLifecycleCoordinator {
     func reconcile(
         _ descriptors: [BackgroundTransferTaskDescriptor]
     ) async throws -> BackgroundTransferRelaunchReport {
+        let durableJobs = await coordinator.snapshot()
         var routes: [BackgroundTransferRoute] = []
         var orphaned: [Int] = []
         var mismatched: [Int] = []
@@ -275,10 +276,22 @@ public extension BackgroundTransferLifecycleCoordinator {
             routes.append(route)
         }
 
+        let boundJobIDs = Set(routes.map(\.jobID))
+        let jobsWithoutTasks = durableJobs.compactMap { job -> UUID? in
+            guard !boundJobIDs.contains(job.id) else { return nil }
+            switch job.state {
+            case .queued, .running, .paused:
+                return job.id
+            case .succeeded, .failed, .cancelled:
+                return nil
+            }
+        }
+
         return BackgroundTransferRelaunchReport(
             routes: routes,
             orphanedTaskIdentifiers: orphaned,
-            mismatchedTaskIdentifiers: mismatched
+            mismatchedTaskIdentifiers: mismatched,
+            jobsWithoutTasks: jobsWithoutTasks
         )
     }
 

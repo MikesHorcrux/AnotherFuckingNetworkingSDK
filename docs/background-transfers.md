@@ -103,6 +103,9 @@ both a durable job and a matching direction. Reconciliation is idempotent for
 the same task/job pair and still throws on a task identifier that is already
 bound to a different job. The SDK does not silently cancel or delete orphaned
 Foundation tasks; the application chooses its cleanup policy.
+`jobsWithoutTasks` lists non-terminal durable jobs that have no valid live
+Foundation task, which lets the application re-enqueue missing work separately
+from cleaning up orphaned tasks.
 
 `BackgroundTransferEvent.taskIdentifier` is available on every task-scoped
 event, while `backgroundEventsFinished` has no task identifier. This makes it

@@ -27,7 +27,8 @@ roadmap item is not a shipped feature.
   policy, preserves idempotent terminal transitions, and pauses resumable
   completions with bounded resume data.
 - Typed post-relaunch reconciliation reports that validate task identity and
-  transfer direction before rebinding live Foundation tasks.
+  transfer direction before rebinding live Foundation tasks, including
+  missing durable jobs that need explicit re-enqueue.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Known upload lengths are available to request customization before
   file-backed signing and replay, without materializing the body.
