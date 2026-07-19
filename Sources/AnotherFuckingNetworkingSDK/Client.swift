@@ -57,6 +57,10 @@ typealias DownloadOperation = @Sendable (
     URLRequest
 ) async throws -> (URL, URLResponse)
 
+typealias RetrySleeper = @Sendable (UInt64) async throws -> Void
+typealias RetryNowProvider = @Sendable () -> Date
+typealias RetryRandomProvider = @Sendable () -> Double
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
@@ -114,6 +118,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     private let activityMonitor: NetworkActivityMonitor?
     private let fileIOExecutor: FileIOExecutor
     private let downloadOperation: DownloadOperation
+    private let retrySleeper: RetrySleeper
+    private let retryNow: RetryNowProvider
+    private let retryRandom: RetryRandomProvider
     private let webSocketTransportFactory: WebSocketTransportFactory
 
     public convenience init(
@@ -155,6 +162,13 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         activityMonitor: NetworkActivityMonitor? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
         downloadOperation: DownloadOperation? = nil,
+        retrySleeper: @escaping RetrySleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        retryNow: @escaping RetryNowProvider = { Date() },
+        retryRandom: @escaping RetryRandomProvider = {
+            Double.random(in: 0...1)
+        },
         webSocketTransportFactory: @escaping WebSocketTransportFactory
     ) {
         state = CriticalState(
@@ -172,6 +186,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         self.downloadOperation = downloadOperation ?? { request in
             try await urlSession.download(for: request)
         }
+        self.retrySleeper = retrySleeper
+        self.retryNow = retryNow
+        self.retryRandom = retryRandom
         self.webSocketTransportFactory = webSocketTransportFactory
     }
 
@@ -265,6 +282,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
+        let retryPolicy = request.retryPolicy
         let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
@@ -272,7 +290,8 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         )
         let (data, httpResponse) = try await performDataRequest(
             urlRequest,
-            acceptedStatusCodes: acceptedStatusCodes
+            acceptedStatusCodes: acceptedStatusCodes,
+            retryPolicy: retryPolicy
         ) {
             try await self.urlSession.data(for: urlRequest)
         }
@@ -318,6 +337,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
+        let retryPolicy = request.retryPolicy
         let configuration = state.withCriticalRegion { $0 }
 
         let bodySource: RequestBodySource
@@ -342,14 +362,21 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         case .data(let data):
             result = try await performDataRequest(
                 urlRequest,
-                acceptedStatusCodes: acceptedStatusCodes
+                acceptedStatusCodes: acceptedStatusCodes,
+                retryPolicy: retryPolicy
             ) {
                 try await self.urlSession.upload(for: urlRequest, from: data)
             }
         case .file(let fileURL):
             result = try await performDataRequest(
                 urlRequest,
-                acceptedStatusCodes: acceptedStatusCodes
+                acceptedStatusCodes: acceptedStatusCodes,
+                retryPolicy: retryPolicy,
+                beforeRetry: {
+                    try await self.fileIOExecutor.run {
+                        try Self.validateUploadSource(fileURL)
+                    }
+                }
             ) {
                 try await self.urlSession.upload(for: urlRequest, fromFile: fileURL)
             }
@@ -386,48 +413,119 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     ) async throws -> DownloadResponse {
         try Task.checkCancellation()
         let acceptedStatusCodes = request.acceptedStatusCodes
+        let retryPolicy = request.retryPolicy
+        let configuration = state.withCriticalRegion { $0 }
         try await fileIOExecutor.run {
             try Self.validateDownloadDestination(destination)
         }
-        let configuration = state.withCriticalRegion { $0 }
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
         )
 
-        try Task.checkCancellation()
-        logger?.log(request: urlRequest)
-
-        let temporaryURL: URL
-        let response: URLResponse
-        do {
-            (temporaryURL, response) = try await downloadOperation(urlRequest)
-        } catch {
-            try Self.throwTransportError(error)
-        }
-
-        do {
+        var attempt = 1
+        while true {
             try Task.checkCancellation()
-            guard let httpResponse = response as? HTTPURLResponse else {
+            logger?.log(request: urlRequest)
+
+            let temporaryURL: URL
+            let response: URLResponse
+            do {
+                (temporaryURL, response) = try await downloadOperation(urlRequest)
+            } catch {
+                let networkError = try Self.mappedTransportError(error)
+                try Task.checkCancellation()
+                let retryDelay: UInt64?
+                if !retryPolicy.isNever,
+                   case .transport(let urlError) = networkError {
+                    retryDelay = retryPolicy.retryDelayNanoseconds(
+                        afterAttempt: attempt,
+                        method: urlRequest.httpMethod ?? "",
+                        failure: .transport(urlError),
+                        now: retryNow(),
+                        randomUnitValue: retryRandom()
+                    )
+                } else {
+                    retryDelay = nil
+                }
+                try Task.checkCancellation()
+                guard let delay = retryDelay else {
+                    throw networkError
+                }
+                logger?.logRetry(
+                    nextAttempt: attempt + 1,
+                    delayNanoseconds: delay
+                )
+                try await waitBeforeRetry(delay)
+                attempt += 1
+                continue
+            }
+
+            var ownsTemporaryFile = true
+            let httpResponse: HTTPURLResponse
+            do {
+                try Task.checkCancellation()
+                guard let response = response as? HTTPURLResponse else {
+                    logger?.log(response: response, data: Data())
+                    try Task.checkCancellation()
+                    throw NetworkError.invalidResponse
+                }
+                httpResponse = response
+
+                guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
+                    try Task.checkCancellation()
+                    let metadataOnlyFailure = Self.makeHTTPFailure(
+                        response: httpResponse,
+                        data: nil
+                    )
+                    let retryDelay: UInt64?
+                    if retryPolicy.isNever {
+                        retryDelay = nil
+                    } else {
+                        retryDelay = retryPolicy.retryDelayNanoseconds(
+                            afterAttempt: attempt,
+                            method: urlRequest.httpMethod ?? "",
+                            failure: .response(metadataOnlyFailure),
+                            now: retryNow(),
+                            randomUnitValue: retryRandom()
+                        )
+                    }
+                    try Task.checkCancellation()
+                    if let delay = retryDelay {
+                        logger?.log(response: response, data: Data())
+                        await discardDownloadedFile(at: temporaryURL)
+                        ownsTemporaryFile = false
+                        try Task.checkCancellation()
+                        logger?.logRetry(
+                            nextAttempt: attempt + 1,
+                            delayNanoseconds: delay
+                        )
+                        try await waitBeforeRetry(delay)
+                        attempt += 1
+                        continue
+                    }
+
+                    let errorData = try await fileIOExecutor.run {
+                        Self.readDownloadErrorData(at: temporaryURL)
+                    }
+                    logger?.log(response: response, data: errorData ?? Data())
+                    try Task.checkCancellation()
+                    throw NetworkError.requestFailed(Self.makeHTTPFailure(
+                        response: httpResponse,
+                        data: errorData
+                    ))
+                }
+
                 logger?.log(response: response, data: Data())
                 try Task.checkCancellation()
-                throw NetworkError.invalidResponse
-            }
-
-            guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
-                let errorData = try await fileIOExecutor.run {
-                    Self.readDownloadErrorData(at: temporaryURL)
+            } catch {
+                if ownsTemporaryFile {
+                    await discardDownloadedFile(at: temporaryURL)
                 }
-                logger?.log(response: response, data: errorData ?? Data())
                 try Task.checkCancellation()
-                throw NetworkError.requestFailed(Self.makeHTTPFailure(
-                    response: httpResponse,
-                    data: errorData
-                ))
+                throw error
             }
 
-            logger?.log(response: response, data: Data())
-            try Task.checkCancellation()
             let storedURL: URL
             do {
                 storedURL = try await fileIOExecutor.runCommitted {
@@ -437,10 +535,13 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
                     )
                 }
             } catch is CancellationError {
+                await discardDownloadedFile(at: temporaryURL)
                 throw CancellationError()
             } catch let error as NetworkError {
+                await discardDownloadedFile(at: temporaryURL)
                 throw error
             } catch {
+                await discardDownloadedFile(at: temporaryURL)
                 throw NetworkError.fileOperationFailed(error)
             }
 
@@ -448,9 +549,6 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
                 fileURL: storedURL,
                 metadata: HTTPResponseMetadata(httpResponse)
             )
-        } catch {
-            await discardDownloadedFile(at: temporaryURL)
-            throw error
         }
     }
 
@@ -512,6 +610,66 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
     private func performDataRequest(
         _ urlRequest: URLRequest,
         acceptedStatusCodes: HTTPStatusPolicy,
+        retryPolicy: HTTPRetryPolicy,
+        beforeRetry: (@Sendable () async throws -> Void)? = nil,
+        operation: @Sendable () async throws -> (Data, URLResponse)
+    ) async throws -> (Data, HTTPURLResponse) {
+        if retryPolicy.isNever {
+            return try await performDataAttempt(
+                urlRequest,
+                acceptedStatusCodes: acceptedStatusCodes,
+                operation: operation
+            )
+        }
+
+        var attempt = 1
+        while true {
+            do {
+                return try await performDataAttempt(
+                    urlRequest,
+                    acceptedStatusCodes: acceptedStatusCodes,
+                    operation: operation
+                )
+            } catch let error as NetworkError {
+                try Task.checkCancellation()
+                let failure: HTTPRetryFailure
+                switch error {
+                case .transport(let urlError):
+                    failure = .transport(urlError)
+                case .requestFailed(let httpFailure):
+                    failure = .response(httpFailure)
+                default:
+                    throw error
+                }
+
+                let retryDelay = retryPolicy.retryDelayNanoseconds(
+                    afterAttempt: attempt,
+                    method: urlRequest.httpMethod ?? "",
+                    failure: failure,
+                    now: retryNow(),
+                    randomUnitValue: retryRandom()
+                )
+                try Task.checkCancellation()
+                guard let delay = retryDelay else {
+                    throw error
+                }
+
+                logger?.logRetry(
+                    nextAttempt: attempt + 1,
+                    delayNanoseconds: delay
+                )
+                try await waitBeforeRetry(delay)
+                if let beforeRetry {
+                    try await beforeRetry()
+                }
+                attempt += 1
+            }
+        }
+    }
+
+    private func performDataAttempt(
+        _ urlRequest: URLRequest,
+        acceptedStatusCodes: HTTPStatusPolicy,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
@@ -522,7 +680,7 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         do {
             (data, response) = try await operation()
         } catch {
-            try Self.throwTransportError(error)
+            throw try Self.mappedTransportError(error)
         }
 
         try Task.checkCancellation()
@@ -540,6 +698,21 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         }
 
         return (data, httpResponse)
+    }
+
+    private func waitBeforeRetry(_ nanoseconds: UInt64) async throws {
+        try Task.checkCancellation()
+        if nanoseconds > 0 {
+            do {
+                try await retrySleeper(nanoseconds)
+            } catch {
+                if Task.isCancelled || error is CancellationError {
+                    throw CancellationError()
+                }
+                throw error
+            }
+        }
+        try Task.checkCancellation()
     }
 
     private static func makeResponse<R: Request>(
@@ -573,9 +746,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
         )
     }
 
-    private static func throwTransportError(
+    private static func mappedTransportError(
         _ error: any Error
-    ) throws -> Never {
+    ) throws -> NetworkError {
         if Task.isCancelled || error is CancellationError {
             throw CancellationError()
         }
@@ -583,9 +756,9 @@ public final class APIClient: APIClientTransferProtocol, WebSocketClientProtocol
             if urlError.code == .cancelled, Task.isCancelled {
                 throw CancellationError()
             }
-            throw NetworkError.transport(urlError)
+            return NetworkError.transport(urlError)
         }
-        throw NetworkError.unknown(error)
+        return NetworkError.unknown(error)
     }
 
     private static func makeHTTPFailure(
@@ -765,6 +938,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     var body: Data? { wrapped.body }
     var queryItems: [URLQueryItem]? { wrapped.queryItems }
     var acceptedStatusCodes: HTTPStatusPolicy { wrapped.acceptedStatusCodes }
+    var retryPolicy: HTTPRetryPolicy { wrapped.retryPolicy }
     var allowsEmptyResponseBody: Bool { wrapped.allowsEmptyResponseBody }
 
     func makeURL(baseURL: URL) -> URL? {

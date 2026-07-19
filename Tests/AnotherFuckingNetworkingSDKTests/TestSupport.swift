@@ -140,7 +140,14 @@ final class StubSession: @unchecked Sendable {
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         fileIOExecutor: FileIOExecutor = .shared,
-        downloadOperation: DownloadOperation? = nil
+        downloadOperation: DownloadOperation? = nil,
+        retrySleeper: @escaping RetrySleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        retryNow: @escaping RetryNowProvider = { Date() },
+        retryRandom: @escaping RetryRandomProvider = {
+            Double.random(in: 0...1)
+        }
     ) -> APIClient {
         APIClient(
             baseURL: baseURL ?? self.baseURL,
@@ -152,6 +159,9 @@ final class StubSession: @unchecked Sendable {
             activityMonitor: activityMonitor,
             fileIOExecutor: fileIOExecutor,
             downloadOperation: downloadOperation,
+            retrySleeper: retrySleeper,
+            retryNow: retryNow,
+            retryRandom: retryRandom,
             webSocketTransportFactory: {
                 session, request, configuration in
                 URLSessionWebSocketTransport(
@@ -187,8 +197,9 @@ actor AsyncSignal {
     private var continuations: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     /// Waits for a signal without allowing a broken callback to hang the suite.
-    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async {
-        guard !isSignaled else { return }
+    @discardableResult
+    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async -> Bool {
+        guard !isSignaled else { return true }
 
         let didSignal = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
@@ -212,6 +223,7 @@ actor AsyncSignal {
         if !didSignal {
             Issue.record("Timed out waiting for an asynchronous test signal")
         }
+        return didSignal
     }
 
     private func waitForSignal() async {

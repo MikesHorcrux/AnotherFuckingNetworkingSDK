@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, replay-safe opt-in retries, WebSockets, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, bounded activity observation, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -233,6 +233,72 @@ Accepting a status does not relax response-body decoding. A bodyless accepted
 status still requires `EmptyResponse`, `RawDataRequest`, or an explicit
 `allowsEmptyResponseBody` implementation. Rejected statuses retain their
 metadata and body through `NetworkError.requestFailed(HTTPFailure)`.
+
+## Replay-safe retries
+
+Requests never retry by default. Opt in per endpoint with a bounded value
+policy when replaying the operation is safe:
+
+```swift
+struct FetchReportRequest: Request {
+    typealias ReturnType = Report
+
+    let reportID: String
+    var path: String { "reports/\(reportID)" }
+    let retryPolicy = HTTPRetryPolicy.transient(
+        maximumAttempts: 3,
+        initialDelay: 0.25,
+        maximumDelay: 10,
+        multiplier: 2,
+        jitter: .full
+    )
+}
+```
+
+`maximumAttempts` includes the initial attempt and is capped at 100. The
+built-in transient policy retries rejected HTTP `408`, `429`, `500`, `502`,
+`503`, and `504` responses plus selected connection, DNS, timeout, and network
+loss `URLError` values. It uses capped exponential backoff with full jitter by
+default. Valid delta-seconds and HTTP-date `Retry-After` values take precedence
+without jitter. A server delay longer than `maximumDelay` stops replay instead
+of retrying earlier than requested.
+
+Automatic replay is limited to final `GET`, `HEAD`, `PUT`, `DELETE`, and
+`OPTIONS` methods. A non-idempotent endpoint must opt in explicitly, normally
+with an idempotency key understood by the server:
+
+```swift
+struct CreatePaymentRequest: Request {
+    typealias ReturnType = Payment
+
+    let idempotencyKey: String
+    let path = "payments"
+    let method = HTTPMethod.post
+    var headers: [String: String]? {
+        ["Idempotency-Key": idempotencyKey]
+    }
+    let retryPolicy = HTTPRetryPolicy.transient(
+        replaySafety: .explicitlyReplayable
+    )
+}
+```
+
+The client snapshots the policy, configuration, encoded body, and final
+customized `URLRequest` once per logical operation. It retries only transport
+or rejected-status failures—not encoding, request customization, decoding,
+invalid responses, filesystem operations, unknown errors, or cancellation.
+Accepted statuses always win, even when the same code appears in the retry
+policy. Exhaustion rethrows the final existing `NetworkError` with its complete
+`HTTPFailure`; there is no metadata-losing wrapper.
+
+Data and file uploads reuse their supplied body. A replayable file upload must
+keep its source stable and readable for the logical operation; the SDK
+revalidates it before every additional attempt. Each abandoned download
+temporary file is discarded before backoff, and only a final accepted response
+can enter the serialized storage commit phase. Cancellation is checked before
+attempts, retry decisions, sleeps, and after sleeping. One retried operation
+remains one `NetworkActivityMonitor` operation, while an injected logger records
+each real request/response attempt and body-free retry scheduling diagnostics.
 
 ## Uploads and downloads
 
@@ -589,6 +655,10 @@ The logger redacts URL paths by default because identifiers and reset tokens oft
 
 Body contents are omitted by default. Set `urlPathPolicy: .included` only when endpoint paths cannot contain sensitive values, and review custom redaction sets before enabling JSON body logging for a production API. Raising `minimumLevel` skips lower-level message construction entirely; for example, `.info` avoids building request cURL strings.
 
+At `.debug`, retry-enabled requests emit a body-free scheduling line before
+each replay. Every actual attempt still emits the ordinary sanitized request
+and response diagnostics.
+
 You can inject a `Sendable` sink for tests or another logging backend:
 
 ```swift
@@ -692,6 +762,12 @@ await mock.stubResponse(
 ```
 
 Ordinary value stubs also satisfy response sends with deterministic HTTP `200` metadata and the mock's fully constructed URL. Successful stubs are checked against the invoking request's status policy; use metadata-aware stubs when a request excludes `200`. A status policy controls response interpretation, so it is intentionally excluded from exact-stub wire identity and recordings. Exact matching and recordings include final URL, method, headers, and body changes made by `customize(_:)`.
+
+`MockAPIClient` models one logical service call rather than URLSession attempts,
+so it deliberately does not execute a request's retry policy. Retry policy is
+excluded from exact wire identity and recordings, and explicit mock failures
+remain authoritative. Test fail-then-success transport behavior with
+`APIClient` and an isolated `URLProtocol` handler.
 
 Unregistered ordinary and paginated calls throw `MockAPIClientError.missingStub`; the mock never manufactures an empty success. Registered failures—including structured `HTTPFailure` values—are rethrown unchanged. Injected delays, task cancellation, reset behavior, and concurrent request recording are deterministic.
 
@@ -815,6 +891,9 @@ Version 2 is a deliberate major-version modernization:
 - Add `acceptedStatusCodes` to requests that intentionally accept non-2xx
   responses or reject part of the default `200...299` range. Existing request
   conformers inherit `.successful`; successful mock stubs now enforce it.
+- Add `retryPolicy` only to replay-safe endpoints that should retry transient
+  failures. Existing request conformers inherit `.never`, and logical mocks do
+  not execute transport retries.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.

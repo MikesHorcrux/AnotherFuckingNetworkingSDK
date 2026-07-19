@@ -145,6 +145,16 @@ public struct NetworkingLogger: Sendable {
         sink(.info, "Response \(response.statusCode) from \(url):\n\(body)")
     }
 
+    /// Emits a body-free diagnostic for an SDK-scheduled HTTP replay.
+    func logRetry(nextAttempt: Int, delayNanoseconds: UInt64) {
+        guard shouldLog(.debug) else { return }
+        let seconds = Double(delayNanoseconds) / 1_000_000_000
+        sink(
+            .debug,
+            "Scheduling HTTP retry attempt \(nextAttempt) after \(seconds) seconds."
+        )
+    }
+
     private func shouldLog(_ level: Level) -> Bool {
         level.rawValue >= configuration.minimumLevel.rawValue
     }
