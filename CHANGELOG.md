@@ -18,6 +18,8 @@ integrating host app.
   typed responses, raw payloads, metadata, pagination, status policies,
   cancellation preservation, and opt-in replay-safe retries.
 - Single-pass bounded HTTP byte streams.
+- Configurable 32 MiB response-body limits for buffered and streaming APIs,
+  per-request overrides, and typed oversize errors before decoding.
 - A global final-request customization hook for correlation IDs, tracing,
   signing, user-agent policy, and other application-wide HTTP/WebSocket policy;
   WebSocket upgrades retain strict Foundation-handshake validation.

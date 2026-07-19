@@ -10,6 +10,8 @@ roadmap item is not a shipped feature.
 - Typed requests, metadata, raw payloads, status policies, pagination, and
   replay-safe opt-in HTTP retries.
 - Single-pass HTTP byte streams with bounded failures and lifecycle activity.
+- Configurable 32 MiB response-body limits for buffered and streaming APIs,
+  with per-request overrides and typed oversize errors.
 - Bounded Server-Sent Events parsing over HTTP byte streams with UTF-8,
   CRLF/LF, multiline data, retry metadata, and cancellation-safe iteration.
 - Typed bounded JSON Lines/NDJSON streaming over HTTP byte streams with

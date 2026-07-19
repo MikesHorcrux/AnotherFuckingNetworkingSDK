@@ -1,5 +1,17 @@
 import Foundation
 
+/// Errors raised while consuming a bounded HTTP byte stream.
+public enum HTTPByteStreamError: LocalizedError, Equatable, Sendable {
+    case responseBodyTooLarge(maximumBytes: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .responseBodyTooLarge(let maximumBytes):
+            return "The response body exceeded the maximum of \(maximumBytes) bytes."
+        }
+    }
+}
+
 /// A single-pass stream of bytes returned by an HTTP response.
 ///
 /// The response metadata is available before the first byte is consumed. A
@@ -26,6 +38,7 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
 
     private let storage: Storage
     private let lifecycle: Lifecycle?
+    private let maximumBytes: Int?
 
     fileprivate final class Lifecycle: @unchecked Sendable {
         private let finish: @Sendable (NetworkActivityOutcome) -> Void
@@ -48,20 +61,27 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
     init(
         bytes: URLSession.AsyncBytes,
         metadata: HTTPResponseMetadata,
-        finish: (@Sendable (NetworkActivityOutcome) -> Void)? = nil
+        finish: (@Sendable (NetworkActivityOutcome) -> Void)? = nil,
+        maximumBytes: Int? = nil
     ) {
         storage = .urlSession(bytes)
         self.metadata = metadata
         lifecycle = finish.map(Lifecycle.init(finish:))
+        self.maximumBytes = maximumBytes
     }
 
     /// Creates a finite in-memory stream for deterministic adapters and test
     /// doubles. Production callers should prefer the URLSession-backed stream
     /// returned by ``APIClient/stream(_:)`` for large responses.
-    public init(data: Data, metadata: HTTPResponseMetadata) {
+    public init(
+        data: Data,
+        metadata: HTTPResponseMetadata,
+        maximumBytes: Int? = nil
+    ) {
         storage = .data(data)
         self.metadata = metadata
         lifecycle = nil
+        self.maximumBytes = maximumBytes
     }
 
     public struct AsyncIterator: AsyncIteratorProtocol {
@@ -72,13 +92,20 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
 
         private var iterator: IteratorStorage
         private let lifecycle: Lifecycle?
+        private let maximumBytes: Int?
+        private let cancelUnderlying: (@Sendable () -> Void)?
+        private var bytesConsumed = 0
 
         fileprivate init(
             iterator: IteratorStorage,
-            lifecycle: Lifecycle?
+            lifecycle: Lifecycle?,
+            maximumBytes: Int?,
+            cancelUnderlying: (@Sendable () -> Void)?
         ) {
             self.iterator = iterator
             self.lifecycle = lifecycle
+            self.maximumBytes = maximumBytes
+            self.cancelUnderlying = cancelUnderlying
         }
 
         public mutating func next() async throws -> UInt8? {
@@ -91,6 +118,16 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
                 case .data(var iterator):
                     value = iterator.next()
                     self.iterator = .data(iterator)
+                }
+                if value != nil, let maximumBytes {
+                    guard bytesConsumed < maximumBytes else {
+                        cancelUnderlying?()
+                        let error = HTTPByteStreamError.responseBodyTooLarge(
+                            maximumBytes: maximumBytes
+                        )
+                        throw error
+                    }
+                    bytesConsumed += 1
                 }
                 if value == nil {
                     lifecycle?.complete(.succeeded)
@@ -112,12 +149,16 @@ public struct HTTPByteStream: AsyncSequence, Sendable {
         case .urlSession(let bytes):
             return AsyncIterator(
                 iterator: .urlSession(bytes.makeAsyncIterator()),
-                lifecycle: lifecycle
+                lifecycle: lifecycle,
+                maximumBytes: maximumBytes,
+                cancelUnderlying: { bytes.task.cancel() }
             )
         case .data(let data):
             return AsyncIterator(
                 iterator: .data(data.makeIterator()),
-                lifecycle: lifecycle
+                lifecycle: lifecycle,
+                maximumBytes: maximumBytes,
+                cancelUnderlying: nil
             )
         }
     }

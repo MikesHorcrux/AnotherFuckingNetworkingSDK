@@ -548,6 +548,7 @@ public enum NetworkError: LocalizedError, Sendable {
     case encodingFailed(any Error)
     case requestConfigurationFailed(any Error)
     case transport(URLError)
+    case responseBodyTooLarge(maximumBytes: Int, actualBytes: Int?)
     case requestFailed(HTTPFailure)
     case emptyResponse(statusCode: Int)
     case decodingFailed(any Error)
@@ -566,6 +567,11 @@ public enum NetworkError: LocalizedError, Sendable {
             return "The URL request could not be configured: \(error.localizedDescription)"
         case .transport(let error):
             return "The request failed before receiving a response: \(error.localizedDescription)"
+        case .responseBodyTooLarge(let maximumBytes, let actualBytes):
+            if let actualBytes {
+                return "The response body is \(actualBytes) bytes; the maximum is \(maximumBytes)."
+            }
+            return "The response body exceeded the maximum of \(maximumBytes) bytes."
         case .requestFailed(let failure):
             return "The server returned HTTP \(failure.statusCode)."
         case .emptyResponse(let statusCode):
@@ -617,6 +623,11 @@ public protocol HTTPRequest: Sendable {
     /// a 401 response. The default permits only idempotent HTTP methods.
     var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety { get }
 
+    /// An optional per-request response-body limit. `nil` uses the client's
+    /// configured default. Streaming consumers fail after the first byte that
+    /// would exceed the limit; buffered responses fail before decoding.
+    var maximumResponseBodyBytes: Int? { get }
+
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -642,6 +653,7 @@ public extension HTTPRequest {
     var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
         .idempotentMethodsOnly
     }
+    var maximumResponseBodyBytes: Int? { nil }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {

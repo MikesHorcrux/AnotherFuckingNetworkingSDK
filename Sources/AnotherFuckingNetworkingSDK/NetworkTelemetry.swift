@@ -241,6 +241,8 @@ func networkTelemetryErrorKind(_ error: any Error) -> NetworkTelemetryErrorKind 
             return .decoding
         case .invalidResponse:
             return .invalidResponse
+        case .responseBodyTooLarge:
+            return .invalidResponse
         case .encodingFailed, .requestConfigurationFailed, .invalidURL:
             return .configuration
         case .fileOperationFailed:

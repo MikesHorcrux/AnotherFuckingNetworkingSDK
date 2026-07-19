@@ -263,6 +263,7 @@ private struct AuthenticatedHTTPRequest<Base: HTTPRequest>: HTTPRequest {
     var headers: [String: String]? { request.headers }
     var acceptedStatusCodes: HTTPStatusPolicy { request.acceptedStatusCodes }
     var retryPolicy: HTTPRetryPolicy { request.retryPolicy }
+    var maximumResponseBodyBytes: Int? { request.maximumResponseBodyBytes }
     var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
         request.authenticationReplaySafety
     }
@@ -367,6 +368,7 @@ private struct AuthenticatedPaginatedRequest<Base: PaginatedRequest>: PaginatedR
     var headers: [String: String]? { request.headers }
     var acceptedStatusCodes: HTTPStatusPolicy { request.acceptedStatusCodes }
     var retryPolicy: HTTPRetryPolicy { request.retryPolicy }
+    var maximumResponseBodyBytes: Int? { request.maximumResponseBodyBytes }
     var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
         request.authenticationReplaySafety
     }

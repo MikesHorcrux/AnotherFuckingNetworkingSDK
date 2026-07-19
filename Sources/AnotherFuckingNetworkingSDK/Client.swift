@@ -251,24 +251,33 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
 
     /// Mutable client configuration protected by ``updateConfiguration(_:)``.
     public struct Configuration: Sendable {
+        /// Default maximum number of response bytes buffered by request APIs.
+        public static let defaultMaximumResponseBodyBytes = 32 * 1_024 * 1_024
+
         public var baseURL: URL?
         public var globalHeaders: [String: String]
         public var encoderFactory: EncoderFactory
         public var decoderFactory: DecoderFactory
         public var requestCustomizer: RequestCustomizer?
+        /// Maximum buffered or streamed response size. `nil` disables the limit.
+        public var maximumResponseBodyBytes: Int?
 
         public init(
             baseURL: URL? = nil,
             globalHeaders: [String: String] = [:],
             encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
             decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
-            requestCustomizer: RequestCustomizer? = nil
+            requestCustomizer: RequestCustomizer? = nil,
+            maximumResponseBodyBytes: Int? = Configuration.defaultMaximumResponseBodyBytes
         ) {
             self.baseURL = baseURL
             self.globalHeaders = globalHeaders
             self.encoderFactory = encoderFactory
             self.decoderFactory = decoderFactory
             self.requestCustomizer = requestCustomizer
+            self.maximumResponseBodyBytes = maximumResponseBodyBytes.flatMap {
+                $0 > 0 ? $0 : nil
+            }
         }
     }
 
@@ -316,6 +325,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         requestCustomizer: RequestCustomizer? = nil,
+        maximumResponseBodyBytes: Int? = Configuration.defaultMaximumResponseBodyBytes,
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         telemetry: NetworkTelemetry? = nil
@@ -327,6 +337,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
             requestCustomizer: requestCustomizer,
+            maximumResponseBodyBytes: maximumResponseBodyBytes,
             logger: logger,
             activityMonitor: activityMonitor,
             telemetry: telemetry,
@@ -349,6 +360,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
         requestCustomizer: RequestCustomizer? = nil,
+        maximumResponseBodyBytes: Int? = Configuration.defaultMaximumResponseBodyBytes,
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         telemetry: NetworkTelemetry? = nil,
@@ -369,7 +381,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 globalHeaders: globalHeaders,
                 encoderFactory: encoderFactory,
                 decoderFactory: decoderFactory,
-                requestCustomizer: requestCustomizer
+                requestCustomizer: requestCustomizer,
+                maximumResponseBodyBytes: maximumResponseBodyBytes
             )
         )
         self.urlSession = urlSession
@@ -602,6 +615,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         let acceptedStatusCodes = request.acceptedStatusCodes
         let retryPolicy = request.retryPolicy
         let configuration = state.withCriticalRegion { $0 }
+        let maximumResponseBodyBytes = request.maximumResponseBodyBytes
+            ?? configuration.maximumResponseBodyBytes
         let urlRequest = try Self.makeURLRequest(
             request,
             configuration: configuration
@@ -736,7 +751,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             return HTTPByteStream(
                 bytes: bytes,
                 metadata: metadata,
-                finish: finish
+                finish: finish,
+                maximumBytes: maximumResponseBodyBytes
             )
         }
     }
@@ -762,6 +778,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             let acceptedStatusCodes = request.acceptedStatusCodes
             let retryPolicy = request.retryPolicy
             let configuration = state.withCriticalRegion { $0 }
+            let maximumResponseBodyBytes = request.maximumResponseBodyBytes
+                ?? configuration.maximumResponseBodyBytes
             let urlRequest = try Self.makeURLRequest(
                 request,
                 configuration: configuration
@@ -771,6 +789,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 urlRequest,
                 acceptedStatusCodes: acceptedStatusCodes,
                 retryPolicy: retryPolicy,
+                maximumResponseBodyBytes: maximumResponseBodyBytes,
                 telemetry: telemetryContext
             ) {
                 let attempt = attemptState.withCriticalRegion { value in
@@ -967,6 +986,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
+                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
+                        ?? configuration.maximumResponseBodyBytes,
                     telemetry: telemetry
                 ) {
                     let attempt = attemptState.withCriticalRegion { value in
@@ -997,6 +1018,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
+                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
+                        ?? configuration.maximumResponseBodyBytes,
                     beforeRetry: {
                         try await self.fileIOExecutor.run {
                             try Self.validateUploadSource(fileURL)
@@ -1037,6 +1060,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     retryPolicy: retryPolicy,
+                    maximumResponseBodyBytes: request.maximumResponseBodyBytes
+                        ?? configuration.maximumResponseBodyBytes,
                     beforeRetry: {
                         try await self.fileIOExecutor.run {
                             try form.validateSources()
@@ -1506,6 +1531,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         _ urlRequest: URLRequest,
         acceptedStatusCodes: HTTPStatusPolicy,
         retryPolicy: HTTPRetryPolicy,
+        maximumResponseBodyBytes: Int?,
         beforeRetry: (@Sendable () async throws -> Void)? = nil,
         telemetry: NetworkTelemetryContext? = nil,
         operation: @Sendable () async throws -> (Data, URLResponse)
@@ -1515,6 +1541,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 urlRequest,
                 acceptedStatusCodes: acceptedStatusCodes,
                 attempt: 1,
+                maximumResponseBodyBytes: maximumResponseBodyBytes,
                 telemetry: telemetry,
                 operation: operation
             )
@@ -1527,6 +1554,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                     urlRequest,
                     acceptedStatusCodes: acceptedStatusCodes,
                     attempt: attempt,
+                    maximumResponseBodyBytes: maximumResponseBodyBytes,
                     telemetry: telemetry,
                     operation: operation
                 )
@@ -1571,6 +1599,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         _ urlRequest: URLRequest,
         acceptedStatusCodes: HTTPStatusPolicy,
         attempt: Int,
+        maximumResponseBodyBytes: Int?,
         telemetry: NetworkTelemetryContext?,
         operation: @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, HTTPURLResponse) {
@@ -1601,8 +1630,16 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             guard acceptedStatusCodes.accepts(httpResponse.statusCode) else {
                 throw NetworkError.requestFailed(Self.makeHTTPFailure(
                     response: httpResponse,
-                    data: data
+                    data: data.count <= 1_024 * 1_024 ? data : nil
                 ))
+            }
+
+            if let maximumResponseBodyBytes,
+               data.count > maximumResponseBodyBytes {
+                throw NetworkError.responseBodyTooLarge(
+                    maximumBytes: maximumResponseBodyBytes,
+                    actualBytes: data.count
+                )
             }
 
             telemetry?.emit(
@@ -1922,6 +1959,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     var queryItems: [URLQueryItem]? { wrapped.queryItems }
     var acceptedStatusCodes: HTTPStatusPolicy { wrapped.acceptedStatusCodes }
     var retryPolicy: HTTPRetryPolicy { wrapped.retryPolicy }
+    var maximumResponseBodyBytes: Int? { wrapped.maximumResponseBodyBytes }
     var allowsEmptyResponseBody: Bool { wrapped.allowsEmptyResponseBody }
 
     func makeURL(baseURL: URL) -> URL? {

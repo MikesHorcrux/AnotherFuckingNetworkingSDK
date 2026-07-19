@@ -116,7 +116,11 @@ source and tests before relying on any example below.
 - Authentication refresh retries only idempotent methods by default. A
   mutation must declare `.explicitlyReplayable`.
 - Status acceptance and body decoding are independent decisions.
-- Never buffer unbounded response, multipart, WebSocket, or error data.
+- Never buffer unbounded response, multipart, WebSocket, or error data. The
+  client defaults to a 32 MiB buffered/streamed response limit; preserve that
+  policy through request wrappers and use explicit per-request overrides only
+  when an endpoint has a justified bound (or intentionally opts out with
+  `nil`).
 - Preserve `CancellationError`; do not turn cancellation into a generic
   transport or retry failure.
 - File cleanup is ownership-aware and must run even when the awaiting task is

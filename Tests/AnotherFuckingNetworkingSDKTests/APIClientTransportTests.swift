@@ -124,6 +124,69 @@ struct APIClientTransportTests {
         #expect(received == body)
     }
 
+    @Test("Buffered responses enforce the client body limit before decoding")
+    func bufferedResponseBodyLimit() async throws {
+        let body = Data("12345".utf8)
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: body))
+        }
+
+        do {
+            _ = try await stub.client(maximumResponseBodyBytes: 4)
+                .sendResponse(RawFixtureRequest())
+            Issue.record("Expected responseBodyTooLarge")
+        } catch let error as NetworkError {
+            guard case .responseBodyTooLarge(
+                let maximumBytes,
+                let actualBytes
+            ) = error else {
+                Issue.record("Expected responseBodyTooLarge, got \(error)")
+                return
+            }
+            #expect(maximumBytes == 4)
+            #expect(actualBytes == 5)
+        }
+    }
+
+    @Test("Streaming responses enforce the per-request body limit")
+    func streamingResponseBodyLimit() async throws {
+        let body = Data([1, 2, 3])
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: body))
+        }
+
+        let stream = try await stub.client().stream(
+            LimitedStreamRequest(maximumResponseBodyBytes: 2)
+        )
+        var iterator = stream.makeAsyncIterator()
+        #expect(try await iterator.next() == 1)
+        #expect(try await iterator.next() == 2)
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected responseBodyTooLarge")
+        } catch let error as HTTPByteStreamError {
+            #expect(error == .responseBodyTooLarge(maximumBytes: 2))
+        }
+    }
+
+    @Test("In-memory byte streams enforce limits without buffering more data")
+    func inMemoryByteStreamBodyLimit() async throws {
+        let stream = HTTPByteStream(
+            data: Data([1, 2, 3]),
+            metadata: HTTPResponseMetadata(statusCode: 200),
+            maximumBytes: 2
+        )
+        var iterator = stream.makeAsyncIterator()
+        #expect(try await iterator.next() == 1)
+        #expect(try await iterator.next() == 2)
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected responseBodyTooLarge")
+        } catch let error as HTTPByteStreamError {
+            #expect(error == .responseBodyTooLarge(maximumBytes: 2))
+        }
+    }
+
     @Test("Rejected byte streams preserve bounded failure data")
     func byteStreamFailure() async throws {
         let body = Data("stream failure".utf8)
@@ -714,6 +777,11 @@ private struct HeaderRequest: Request {
     typealias ReturnType = TestUser
     let path = "users/1"
     let headers: [String: String]? = ["Authorization": "Bearer request"]
+}
+
+private struct LimitedStreamRequest: HTTPRequest {
+    let maximumResponseBodyBytes: Int?
+    let path = "users/1"
 }
 
 private struct StatusPolicyRequest: Request {
