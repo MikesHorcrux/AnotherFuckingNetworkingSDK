@@ -24,7 +24,8 @@ roadmap item is not a shipped feature.
   primitives for app-owned background callbacks.
 - Actor-isolated `BackgroundTransferLifecycleCoordinator` that applies routed
   Foundation callbacks, commits temporary downloads through an explicit file
-  policy, and preserves idempotent terminal transitions.
+  policy, preserves idempotent terminal transitions, and pauses resumable
+  completions with bounded resume data.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Known upload lengths are available to request customization before
   file-backed signing and replay, without materializing the body.

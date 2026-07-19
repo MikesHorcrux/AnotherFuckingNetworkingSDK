@@ -196,7 +196,7 @@ struct BackgroundTransferTests {
             }
         }
 
-        #expect(await started.wait())
+        #expect(await started.wait(timeoutNanoseconds: 30_000_000_000))
         task.cancel()
         do {
             _ = try await task.value

@@ -155,6 +155,39 @@ struct BackgroundTransferLifecycleTests {
         #expect(finished.state == .succeeded)
     }
 
+    @Test("Resumable background completion pauses and preserves resume data")
+    func resumableCompletionPauses() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let job = TransferJob(kind: .download, requestKey: "resume")
+        try await coordinator.enqueue(job)
+        let route = BackgroundTransferRoute(
+            taskIdentifier: 11,
+            jobID: job.id,
+            kind: .download
+        )
+        let lifecycle = BackgroundTransferLifecycleCoordinator(
+            router: BackgroundTransferEventRouter(routes: [route]),
+            coordinator: coordinator,
+            commitDownload: { _, temporaryURL, _ in temporaryURL }
+        )
+        let resumeData = Data([4, 5, 6])
+
+        let outcome = try await lifecycle.handle(.completed(
+            taskIdentifier: 11,
+            errorDescription: "NSURLErrorDomain (-999)",
+            resumeData: resumeData
+        ))
+
+        guard case .paused(let paused)? = outcome else {
+            Issue.record("Expected resumable completion to pause the job")
+            return
+        }
+        #expect(paused.state == .paused)
+        #expect(paused.resumeData == resumeData)
+        #expect(paused.lastError == nil)
+    }
+
     @Test("Malformed callback failures become a safe bounded identity")
     func malformedFailureIsSafe() async throws {
         let store = InMemoryTransferJobStore()
@@ -175,7 +208,7 @@ struct BackgroundTransferLifecycleTests {
         let outcome = try await lifecycle.handle(.completed(
             taskIdentifier: 12,
             errorDescription: "Authorization: secret response body",
-            resumeData: Data([1])
+            resumeData: nil
         ))
 
         guard case .failed(let failed)? = outcome else {

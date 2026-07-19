@@ -51,9 +51,10 @@ source and tests before relying on any example below.
   authentication, and destination commits in application policy. Reconcile
   task IDs with `BackgroundTransferEventRouter`, then use the lifecycle actor
   to start restored jobs, checkpoint progress, commit downloads, and record
-  failures. The Foundation background adapter is iOS/macOS-only; pair the
-  durable coordinator with platform-owned transports on tvOS, watchOS, and
-  visionOS.
+  failures. Completion callbacks carrying bounded resume data become paused
+  jobs; non-resumable callbacks become failures. The Foundation background
+  adapter is iOS/macOS-only; pair the durable coordinator with platform-owned
+  transports on tvOS, watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO

@@ -45,6 +45,8 @@ and the package test suite on the first installed iOS simulator. The local
 `NWListener` WebSocket loopback fixture is skipped only on that simulator run
 because iOS Simulator does not provide the listener NECP entitlement; mock
 WebSocket coverage still runs there and the real loopback suite runs on macOS.
+Simulator tests are explicitly serialized to avoid cooperative-executor
+starvation in cancellation-heavy Swift Testing cases on hosted runners.
 
 ## Performance gates
 
