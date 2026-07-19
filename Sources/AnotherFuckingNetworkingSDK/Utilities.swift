@@ -1,130 +1,263 @@
 import Foundation
-import os.log
-import Security
+import OSLog
 
-// MARK: - NetworkingLogger
-
-/// For those who want to see cURL commands in the console.
+/// An opt-in, redacting logger for networking diagnostics.
+///
+/// Raw requests and response bodies are sanitized before they reach the sink.
+/// The default sink writes the sanitized message to unified logging.
 public struct NetworkingLogger: Sendable {
-    private let logger = Logger(subsystem: "com.your-org.AnotherFuckingNetworkingSDK", category: "Networking")
-    private let queue = DispatchQueue(label: "AnotherFuckingNetworkingSDKLoggerQueue")
-    
-    public init() {}
-    
+    public enum Level: Equatable, Sendable {
+        case debug
+        case info
+        case error
+    }
+
+    /// Controls whether a request or response body may appear in a log message.
+    public enum BodyPolicy: Equatable, Sendable {
+        /// Never include body contents.
+        case omitted
+
+        /// Include valid JSON no larger than the limit after recursively
+        /// redacting configured keys. Invalid, binary, and oversized bodies
+        /// are represented only by their byte count.
+        case redactedJSON(maximumBytes: Int)
+    }
+
+    /// Immutable logging and redaction settings.
+    public struct Configuration: Sendable {
+        public static let defaultRedactedHeaders: Set<String> = [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key"
+        ]
+
+        public static let defaultRedactedQueryItems: Set<String> = [
+            "access_token",
+            "refresh_token",
+            "api_key",
+            "token",
+            "password",
+            "secret",
+            "code"
+        ]
+
+        public static let defaultRedactedJSONKeys: Set<String> = [
+            "access_token",
+            "refresh_token",
+            "api_key",
+            "token",
+            "authorization",
+            "password",
+            "secret",
+            "code"
+        ]
+
+        public var redactedHeaders: Set<String>
+        public var redactedQueryItems: Set<String>
+        public var redactedJSONKeys: Set<String>
+        public var bodyPolicy: BodyPolicy
+        public var redactionPlaceholder: String
+
+        public init(
+            redactedHeaders: Set<String> = Self.defaultRedactedHeaders,
+            redactedQueryItems: Set<String> = Self.defaultRedactedQueryItems,
+            redactedJSONKeys: Set<String> = Self.defaultRedactedJSONKeys,
+            bodyPolicy: BodyPolicy = .omitted,
+            redactionPlaceholder: String = "<redacted>"
+        ) {
+            self.redactedHeaders = Self.normalized(redactedHeaders)
+            self.redactedQueryItems = Self.normalized(redactedQueryItems)
+            self.redactedJSONKeys = Self.normalized(redactedJSONKeys)
+            self.bodyPolicy = bodyPolicy
+            self.redactionPlaceholder = redactionPlaceholder
+        }
+
+        private static func normalized(_ values: Set<String>) -> Set<String> {
+            Set(values.map { $0.lowercased() })
+        }
+    }
+
+    public typealias Sink = @Sendable (Level, String) -> Void
+
+    public let configuration: Configuration
+
+    private let sink: Sink
+
+    public init(configuration: Configuration = Configuration()) {
+        self.init(configuration: configuration, sink: Self.defaultSink)
+    }
+
+    public init(
+        configuration: Configuration = Configuration(),
+        sink: @escaping Sink
+    ) {
+        self.configuration = configuration
+        self.sink = sink
+    }
+
+    /// Emits a sanitized cURL representation of a request.
     public func log(request: URLRequest) {
-        queue.async {
-            let curlStr = request.curl
-            self.logger.debug("🍺 Outgoing request:\n\(curlStr)")
-        }
+        sink(.debug, "Outgoing request:\n\(curlCommand(for: request))")
     }
-    
+
+    /// Emits a sanitized HTTP response summary.
     public func log(response: URLResponse, data: Data) {
-        queue.async {
-            guard let httpResp = response as? HTTPURLResponse,
-                  let urlString = httpResp.url?.absoluteString else {
-                self.logger.error("❗️Invalid HTTPURLResponse or missing URL.")
-                return
+        guard let response = response as? HTTPURLResponse else {
+            sink(.error, "Received a non-HTTP response.")
+            return
+        }
+
+        let url = response.url.map { sanitizedURL($0).absoluteString }
+            ?? "<unknown URL>"
+        let body = sanitizedBody(data).description
+        sink(.info, "Response \(response.statusCode) from \(url):\n\(body)")
+    }
+
+    /// Returns a shell-safe cURL command containing only sanitized values.
+    public func curlCommand(for request: URLRequest) -> String {
+        var arguments = ["curl"]
+        arguments.append(contentsOf: [
+            "--request",
+            shellQuote(request.httpMethod ?? HTTPMethod.get.rawValue),
+            "--url",
+            shellQuote(sanitizedURL(request.url).absoluteString)
+        ])
+
+        let headers = (request.allHTTPHeaderFields ?? [:]).sorted {
+            let comparison = $0.key.caseInsensitiveCompare($1.key)
+            return comparison == .orderedSame
+                ? $0.key < $1.key
+                : comparison == .orderedAscending
+        }
+        for (name, value) in headers {
+            let sanitizedValue = configuration.redactedHeaders.contains(name.lowercased())
+                ? configuration.redactionPlaceholder
+                : value
+            arguments.append("--header")
+            arguments.append(shellQuote("\(name): \(sanitizedValue)"))
+        }
+
+        if let body = request.httpBody, !body.isEmpty {
+            switch sanitizedBody(body) {
+            case .included(let value):
+                arguments.append("--data-binary")
+                arguments.append(shellQuote(value))
+            case .omitted(let description):
+                arguments.append("# \(description)")
             }
-            let status = httpResp.statusCode
-            let prettyJSON = self.prettyPrintedJSON(from: data) ?? (String(data: data, encoding: .utf8) ?? "<no body>")
-            self.logger.info("🍻 Response \(status) from \(urlString):\n\(prettyJSON)")
+        } else if request.httpBodyStream != nil {
+            arguments.append("# streaming body omitted")
         }
+
+        return arguments.joined(separator: " ")
     }
-    
-    private func prettyPrintedJSON(from data: Data) -> String? {
-        do {
-            let object = try JSONSerialization.jsonObject(with: data, options: [])
-            let prettyData = try JSONSerialization.data(withJSONObject: object, options: .prettyPrinted)
-            return String(data: prettyData, encoding: .utf8)
-        } catch {
-            return nil
+
+    private func sanitizedURL(_ url: URL?) -> URL {
+        guard let url,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return URL(string: "about:blank")!
         }
-    }
-}
 
-// MARK: - Dictionary Merge
-
-extension Dictionary {
-    public func merged(with dict: [Key: Value]) -> [Key: Value] {
-        var copy = self
-        for (k, v) in dict {
-            copy[k] = v
+        if components.user != nil {
+            components.user = configuration.redactionPlaceholder
         }
-        return copy
-    }
-}
+        if components.password != nil {
+            components.password = configuration.redactionPlaceholder
+        }
+        components.queryItems = components.queryItems?.map { item in
+            guard configuration.redactedQueryItems.contains(item.name.lowercased()) else {
+                return item
+            }
+            return URLQueryItem(
+                name: item.name,
+                value: item.value == nil ? nil : configuration.redactionPlaceholder
+            )
+        }
 
-// MARK: - URLRequest + cURL
-
-extension URLRequest {
-    /// A command so you can curl the fuck out of it
-    var curl: String {
-        let newLine = " \\\n"
-        return "curl " + curlComponents.map(\.option).joined(separator: newLine)
+        return components.url ?? URL(string: "about:blank")!
     }
-    
-    private var curlComponents: [CurlComponent] {
-        var comps: [CurlComponent] = []
-        comps.append(.url(url?.absoluteString ?? ""))
-        comps.append(.method(httpMethod ?? "GET"))
-        
-        if let headers = allHTTPHeaderFields {
-            for (key, value) in headers {
-                comps.append(.header(key: key, value: value))
+
+    private func sanitizedBody(_ data: Data) -> SanitizedBody {
+        switch configuration.bodyPolicy {
+        case .omitted:
+            return .omitted("body omitted: \(data.count) bytes")
+
+        case .redactedJSON(let maximumBytes):
+            guard maximumBytes >= 0, data.count <= maximumBytes else {
+                return .omitted("body omitted: \(data.count) bytes")
+            }
+
+            do {
+                let object = try JSONSerialization.jsonObject(
+                    with: data,
+                    options: [.fragmentsAllowed]
+                )
+                let sanitized = sanitizeJSON(object)
+                let sanitizedData = try JSONSerialization.data(
+                    withJSONObject: sanitized,
+                    options: [.sortedKeys, .fragmentsAllowed]
+                )
+                guard let body = String(data: sanitizedData, encoding: .utf8) else {
+                    return .omitted("body omitted: \(data.count) bytes")
+                }
+                return .included(body)
+            } catch {
+                return .omitted("body omitted: \(data.count) bytes")
             }
         }
-        
-        if let httpBody = httpBody,
-           let bodyString = String(data: httpBody, encoding: .utf8),
-           !bodyString.isEmpty {
-            comps.append(.body(bodyString))
-        }
-        
-        return comps
     }
-    
-    private enum CurlComponent {
-        case url(String)
-        case method(String)
-        case header(key: String, value: String)
-        case body(String)
-        
-        var option: String {
+
+    private func sanitizeJSON(_ value: Any) -> Any {
+        if let dictionary = value as? [String: Any] {
+            return dictionary.reduce(into: [String: Any]()) { result, pair in
+                let (key, value) = pair
+                result[key] = configuration.redactedJSONKeys.contains(key.lowercased())
+                    ? configuration.redactionPlaceholder
+                    : sanitizeJSON(value)
+            }
+        }
+
+        if let array = value as? [Any] {
+            return array.map(sanitizeJSON(_:))
+        }
+
+        return value
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private enum SanitizedBody {
+        case included(String)
+        case omitted(String)
+
+        var description: String {
             switch self {
-            case .url(let urlStr):
-                return "-i '\(urlStr)'"
-            case .method(let m):
-                return "-X \(m)"
-            case .header(let k, let v):
-                return "-H '\(k): \(v)'"
-            case .body(let b):
-                return "--data '\(b)'"
+            case .included(let value):
+                return value
+            case .omitted(let value):
+                return "<\(value)>"
             }
         }
     }
-}
 
-// MARK: - RandomNonce (Optional)
+    private static let osLogger = Logger(
+        subsystem: "com.mikeshorcrux.AnotherFuckingNetworkingSDK",
+        category: "Networking"
+    )
 
-extension String {
-    public static func randomNonce(length: Int = 32) -> String? {
-        precondition(length > 0)
-        let charset: Array<Character> = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
-        var result = ""
-        var remainingLength = length
-        
-        while remainingLength > 0 {
-            var random: UInt8 = 0
-            let errorCode = SecRandomCopyBytes(kSecRandomDefault, 1, &random)
-            guard errorCode == errSecSuccess else {
-                fatalError("Unable to generate nonce. SecRandomCopyBytes failed with code \(errorCode)")
-            }
-            
-            if random < charset.count {
-                result.append(charset[Int(random)])
-                remainingLength -= 1
-            }
+    private static let defaultSink: Sink = { level, message in
+        switch level {
+        case .debug:
+            osLogger.debug("\(message, privacy: .public)")
+        case .info:
+            osLogger.info("\(message, privacy: .public)")
+        case .error:
+            osLogger.error("\(message, privacy: .public)")
         }
-        return result
     }
 }
