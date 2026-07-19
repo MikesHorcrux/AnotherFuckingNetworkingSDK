@@ -18,6 +18,7 @@ run.
 | Check | Command/result | Evidence level |
 | --- | --- | --- |
 | Strict host suite | `swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors` — 357 tests in 42 suites passed in Debug and Release | Strong unit/integration evidence |
+| Signed-host fixture compile | `xcodebuild ... BackgroundTransferHost ... generic/platform=iOS CODE_SIGNING_ALLOWED=NO` — exit 0 in Release with strict concurrency | Strong compile evidence; no runtime claim |
 | iOS simulator suite | Prior simulator evidence remains recorded below; no new simulator run was needed for this documentation-only refresh | Existing simulator evidence |
 | Physical product build | No new device product build; the paired iPad was locked and its developer tunnel was unavailable | Missing device-build evidence for this refresh |
 | Physical package tests | Not executable: SwiftPM test targets have no host application, and Xcode reports tool-hosted testing is unavailable on device destinations | Missing runtime evidence |

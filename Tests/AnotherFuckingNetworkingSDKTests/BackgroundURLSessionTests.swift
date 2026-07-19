@@ -244,6 +244,32 @@ struct BackgroundURLSessionTests {
         task.cancel()
     }
 
+    @Test("A suspended download can bind its durable route before resuming")
+    func suspendedDownloadBindsBeforeResume() async throws {
+        let adapter = BackgroundURLSessionAdapter(
+            identifier: "com.anotherfuckingnetworkingsdk.suspended.\(UUID())"
+        ) { _ in }
+        defer { adapter.invalidateAndCancel() }
+
+        let jobID = UUID()
+        let request = URLRequest(
+            url: URL(string: "https://example.com/ordered-file")!
+        )
+        let task = try adapter.downloadValidated(
+            request,
+            jobID: jobID,
+            startImmediately: false
+        )
+        let descriptors = await adapter.transferTasks()
+        #expect(descriptors.contains {
+            $0.taskIdentifier == task.taskIdentifier
+                && $0.jobID == jobID
+                && $0.isDownload
+        })
+
+        try await adapter.resume(taskIdentifier: task.taskIdentifier)
+    }
+
     @Test("Background task controls report missing relaunch tasks")
     func missingTaskControls() async throws {
         let adapter = BackgroundURLSessionAdapter(

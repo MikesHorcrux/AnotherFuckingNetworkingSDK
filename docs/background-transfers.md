@@ -73,6 +73,12 @@ Passing `jobID` stores a namespaced, opaque task description. On relaunch,
 reconcile Foundation's still-running tasks with the durable job index before
 handling delegate events:
 
+When a newly created task must be bound before any delegate callback can be
+delivered, pass `startImmediately: false` to `download` or
+`downloadValidated`, bind the returned task identifier through
+`BackgroundTransferEventRouter`, and call `resume(taskIdentifier:)`. The
+default remains `true` for the concise path.
+
 ```swift
 for task in await adapter.transferTasks() {
     guard let jobID = task.jobID else { continue }

@@ -74,8 +74,9 @@ roadmap item is not a shipped feature.
    `BackgroundURLSessionAdapter` on each supported Apple platform. The SDK now
    exposes stable task descriptors, an actor-isolated event router, a
    lifecycle coordinator with an explicit destination commit policy, and a
-   typed relaunch reconciliation report; device coverage and platform
-   terminal behavior remain.
+   typed relaunch reconciliation report. A signed-host fixture now exists at
+   `Examples/BackgroundTransferHost`; detached physical-device execution and
+   platform-specific terminal behavior remain.
 2. **Platform task-metrics integration** — oldest-target and device coverage
    remain for the shipped HTTP, transfer, and WebSocket delegate integrations.
 3. **Streaming multipart integration** — broader upload retry, signing, and

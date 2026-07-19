@@ -59,6 +59,18 @@ jobs:
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             build
+      - name: Background transfer host fixture build
+        run: |
+          xcodebuild -quiet \
+            -project Examples/BackgroundTransferHost/BackgroundTransferHost.xcodeproj \
+            -scheme BackgroundTransferHost \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/afn-background-host-derived" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/afn-background-host-packages" \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            build
       - name: macOS 12 product builds
         run: |
           xcodebuild -quiet \

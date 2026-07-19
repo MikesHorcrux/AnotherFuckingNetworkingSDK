@@ -45,6 +45,13 @@ background modes, or a destination policy. The host app must wire
 `setBackgroundEventsCompletionHandler` to its lifecycle callback and keep the
 adapter/delegate alive for the session's lifetime.
 
+This repository includes a minimal signed-host fixture at
+[Examples/BackgroundTransferHost](../Examples/BackgroundTransferHost/README.md).
+It uses the SDK's durable coordinator, relaunch reconciliation, bounded
+resume-data validation, and Observation-based UI. Build it unsigned for a
+generic iOS compile gate; sign it with an integrating team's development
+profile for the detached-device scenarios below.
+
 ## Required scenarios
 
 | Scenario | Expected evidence |

@@ -45,6 +45,8 @@ integrating host app.
   validated download task creation.
 - Format-agnostic resume-data validation with opt-in property-list integrity
   checks.
+- Background downloads can be created suspended so applications can bind the
+  Foundation task identifier to durable routing before resuming it.
 
 ### WebSockets and diagnostics
 
@@ -66,7 +68,9 @@ integrating host app.
   platforms, and Mac Catalyst.
 - Physical-device background execution, OS termination, protected storage,
   relaunch, and radio-transition validation remain a host-app release gate;
-  see [`docs/device-validation.md`](docs/device-validation.md).
+  the repository now includes a signed-host fixture at
+  [`Examples/BackgroundTransferHost`](Examples/BackgroundTransferHost/README.md)
+  and the runbook at [`docs/device-validation.md`](docs/device-validation.md).
 
 ## Release process
 
