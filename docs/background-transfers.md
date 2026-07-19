@@ -87,7 +87,9 @@ after process termination without persisting requests or credentials.
 
 `BackgroundTransferEventRouter` is an actor that rejects accidental task-ID
 collisions, supports idempotent relaunch reconciliation, and returns typed
-`BackgroundTransferRoutedEvent` values. It intentionally leaves file moves,
+`BackgroundTransferRoutedEvent` values. Task descriptors and routes are
+`Codable`, so an app may persist the reconciliation table alongside its durable
+jobs. The router intentionally leaves file moves,
 resume-data validation, authentication, and terminal job commits to the
 application's `TransferJobCoordinator` policy.
 

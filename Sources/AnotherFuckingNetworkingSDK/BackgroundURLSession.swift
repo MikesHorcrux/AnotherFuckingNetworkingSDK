@@ -56,7 +56,7 @@ public enum BackgroundTransferEvent: Equatable, Sendable {
 /// A stable, relaunch-safe description of a task discovered in a background
 /// session. The optional job ID is encoded in the task description when a
 /// transfer is started through ``BackgroundURLSessionAdapter``.
-public struct BackgroundTransferTaskDescriptor: Equatable, Sendable {
+public struct BackgroundTransferTaskDescriptor: Codable, Equatable, Sendable {
     public let taskIdentifier: Int
     public let jobID: UUID?
     public let originalURL: URL?
