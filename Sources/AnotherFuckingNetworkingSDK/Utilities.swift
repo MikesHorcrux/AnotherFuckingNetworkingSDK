@@ -5,7 +5,7 @@ import Security
 // MARK: - NetworkingLogger
 
 /// For those who want to see cURL commands in the console.
-public struct NetworkingLogger {
+public struct NetworkingLogger: Sendable {
     private let logger = Logger(subsystem: "com.your-org.AnotherFuckingNetworkingSDK", category: "Networking")
     private let queue = DispatchQueue(label: "AnotherFuckingNetworkingSDKLoggerQueue")
     
@@ -127,4 +127,4 @@ extension String {
         }
         return result
     }
-} 
+}
