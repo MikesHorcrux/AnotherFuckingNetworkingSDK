@@ -9,12 +9,23 @@ public protocol APIClientProtocol: Sendable {
     ) async throws -> PaginatedResponse<R.ReturnType>
 }
 
+/// An API client that can also return HTTP response metadata.
+public protocol APIClientResponseProtocol: APIClientProtocol {
+    func sendResponse<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType>
+
+    func sendPageResponse<R: PaginatedRequest>(
+        _ request: R
+    ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>>
+}
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientProtocol, Sendable {
+public final class APIClient: APIClientResponseProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -93,33 +104,19 @@ public final class APIClient: APIClientProtocol, Sendable {
 
     /// Sends a request and decodes its declared response type.
     public func send<R: Request>(_ request: R) async throws -> R.ReturnType {
+        try await sendResponse(request).value
+    }
+
+    /// Sends a request and returns its decoded value with HTTP metadata.
+    public func sendResponse<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
         let configuration = state.withLock { $0 }
-
-        guard let baseURL = configuration.baseURL,
-              let url = request.makeURL(baseURL: baseURL) else {
-            throw NetworkError.invalidURL
-        }
-
-        var urlRequest = URLRequest(url: url)
-        urlRequest.httpMethod = request.method.rawValue
-
-        let headers = Self.mergingHeaders(
-            defaults: configuration.globalHeaders,
-            overrides: request.headers ?? [:]
+        let urlRequest = try Self.makeURLRequest(
+            request,
+            configuration: configuration
         )
-        for (name, value) in headers {
-            urlRequest.setValue(value, forHTTPHeaderField: name)
-        }
-
-        do {
-            urlRequest.httpBody = try request.makeBody(using: configuration.encoderFactory())
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw NetworkError.encodingFailed(error)
-        }
-
         try Task.checkCancellation()
         logger?.log(request: urlRequest)
 
@@ -152,36 +149,103 @@ public final class APIClient: APIClientProtocol, Sendable {
             )
         }
 
-        let hasSemanticallyEmptyBody = data.isEmpty
-            || httpResponse.statusCode == 204
-            || httpResponse.statusCode == 205
-
-        if hasSemanticallyEmptyBody {
-            if let emptyResponse = EmptyResponse() as? R.ReturnType {
-                return emptyResponse
-            }
-            throw NetworkError.emptyResponse(statusCode: httpResponse.statusCode)
-        }
-
+        let value: R.ReturnType
         do {
-            return try request.decode(
-                data,
+            value = try Self.decode(
+                request,
+                data: data,
                 response: httpResponse,
-                using: configuration.decoderFactory()
+                decoder: configuration.decoderFactory()
             )
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as NetworkError {
+            throw error
         } catch {
             throw NetworkError.decodingFailed(error)
         }
+
+        return HTTPResponse(
+            value: value,
+            data: data,
+            metadata: HTTPResponseMetadata(httpResponse)
+        )
     }
 
     /// Sends a page-number-based request while preserving its existing URL.
     public func sendPage<R: PaginatedRequest>(
         _ request: R
     ) async throws -> PaginatedResponse<R.ReturnType> {
+        try await sendPageResponse(request).value
+    }
+
+    /// Sends a page-number-based request and returns HTTP metadata.
+    public func sendPageResponse<R: PaginatedRequest>(
+        _ request: R
+    ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>> {
         let wrapper = PaginatedRequestWrapper(request: request)
-        return try await send(wrapper)
+        return try await sendResponse(wrapper)
+    }
+
+    private static func makeURLRequest<R: Request>(
+        _ request: R,
+        configuration: Configuration
+    ) throws -> URLRequest {
+        guard let baseURL = configuration.baseURL,
+              let url = request.makeURL(baseURL: baseURL) else {
+            throw NetworkError.invalidURL
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = request.method.rawValue
+
+        let headers = mergingHeaders(
+            defaults: configuration.globalHeaders,
+            overrides: request.headers ?? [:]
+        )
+        for (name, value) in headers {
+            urlRequest.setValue(value, forHTTPHeaderField: name)
+        }
+
+        do {
+            urlRequest.httpBody = try request.makeBody(using: configuration.encoderFactory())
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.encodingFailed(error)
+        }
+
+        do {
+            try request.customize(&urlRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.requestConfigurationFailed(error)
+        }
+
+        return urlRequest
+    }
+
+    private static func decode<R: Request>(
+        _ request: R,
+        data: Data,
+        response: HTTPURLResponse,
+        decoder: JSONDecoder
+    ) throws -> R.ReturnType {
+        let hasSemanticallyEmptyBody = data.isEmpty
+            || response.statusCode == 204
+            || response.statusCode == 205
+
+        if hasSemanticallyEmptyBody {
+            if let emptyResponse = EmptyResponse() as? R.ReturnType {
+                return emptyResponse
+            }
+            guard request.allowsEmptyResponseBody else {
+                throw NetworkError.emptyResponse(statusCode: response.statusCode)
+            }
+        }
+
+        return try request.decode(data, response: response, using: decoder)
     }
 
     private static func mergingHeaders(
@@ -225,6 +289,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     var headers: [String: String]? { wrapped.headers }
     var body: Data? { wrapped.body }
     var queryItems: [URLQueryItem]? { wrapped.queryItems }
+    var allowsEmptyResponseBody: Bool { wrapped.allowsEmptyResponseBody }
 
     func makeURL(baseURL: URL) -> URL? {
         guard let requestURL = wrapped.makeURL(baseURL: baseURL),
@@ -256,6 +321,10 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         try wrapped.makeBody(using: encoder)
+    }
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        try wrapped.customize(&urlRequest)
     }
 
     func decode(

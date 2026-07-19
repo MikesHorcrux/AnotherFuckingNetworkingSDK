@@ -17,6 +17,42 @@ struct MockAPIClientTests {
         #expect(value == expected)
     }
 
+    @Test("Response stubs support metadata-aware protocol injection")
+    func responseStubs() async throws {
+        let mock = MockAPIClient()
+        let body = Data(#"{"fixture":true}"#.utf8)
+        let expected = HTTPResponse(
+            value: TestUser(id: 42, displayName: "Arthur"),
+            data: body,
+            metadata: HTTPResponseMetadata(
+                statusCode: 202,
+                url: URL(string: "https://api.example.com/users/42"),
+                headers: ["X-Request-ID": "request-42"]
+            )
+        )
+        await mock.stubResponse(GetUserRequest.self, with: expected)
+        let client: any APIClientResponseProtocol = mock
+
+        let response = try await client.sendResponse(GetUserRequest(id: 42))
+
+        #expect(response == expected)
+        #expect(response.value(forHTTPHeaderField: "x-request-id") == "request-42")
+    }
+
+    @Test("Ordinary mock stubs synthesize stable HTTP metadata")
+    func synthesizedResponseMetadata() async throws {
+        let mock = MockAPIClient()
+        let expected = TestUser(id: 7, displayName: "Ford")
+        await mock.stub(GetUserRequest.self, with: expected)
+
+        let response = try await mock.sendResponse(GetUserRequest(id: 7))
+
+        #expect(response.value == expected)
+        #expect(response.statusCode == 200)
+        #expect(response.url == URL(string: "https://mock.invalid/users/7"))
+        #expect(response.data.isEmpty)
+    }
+
     @Test("Exact success overrides a type-wide error")
     func exactSuccessPrecedence() async throws {
         let mock = MockAPIClient()
@@ -169,7 +205,9 @@ struct MockAPIClientTests {
 
     @Test("Invocations record structured request data and reset atomically")
     func recordingAndReset() async throws {
-        let mock = MockAPIClient()
+        let mock = MockAPIClient(globalHeaders: [
+            "Authorization": "Bearer fixture"
+        ])
         let request = RecordingRequest()
         try await mock.stub(request, with: EmptyResponse())
 
@@ -184,7 +222,10 @@ struct MockAPIClientTests {
         #expect(record.url.absoluteString == "https://mock.invalid/record?q=value")
         #expect(record.path == "record")
         #expect(record.queryItems == [URLQueryItem(name: "q", value: "value")])
-        #expect(record.headers == ["X-Test": "header"])
+        #expect(record.headers == [
+            "authorization": "Bearer fixture",
+            "x-test": "header"
+        ])
         #expect(record.body == Data("body".utf8))
 
         await mock.clearRecordedRequests()
@@ -245,6 +286,31 @@ struct MockAPIClientTests {
         #expect(await mock.recordedRequests.map(\.url.absoluteString) == [
             "https://example.com/v1/shared?variant=first",
             "https://example.com/v1/shared?variant=second"
+        ])
+    }
+
+    @Test("Exact stubs match and record final URLRequest customization")
+    func customizedRequestMatching() async throws {
+        let mock = MockAPIClient()
+        let first = CustomizedMockRequest(token: "first")
+        let second = CustomizedMockRequest(token: "second")
+        let firstResponse = TestUser(id: 1, displayName: "First")
+        let secondResponse = TestUser(id: 2, displayName: "Second")
+        try await mock.stub(first, with: firstResponse)
+        try await mock.stub(second, with: secondResponse)
+
+        #expect(try await mock.send(first) == firstResponse)
+        #expect(try await mock.send(second) == secondResponse)
+
+        let records = await mock.recordedRequests
+        #expect(records.map(\.url.absoluteString) == [
+            "https://mock.invalid/customized?token=first",
+            "https://mock.invalid/customized?token=second"
+        ])
+        #expect(records.map { $0.headers["x-signature"] } == ["first", "second"])
+        #expect(records.compactMap(\.body) == [
+            Data("first".utf8),
+            Data("second".utf8)
         ])
     }
 
@@ -458,6 +524,20 @@ struct MockAPIClientTests {
         } catch {
             #expect(error is CancellationError)
         }
+
+        do {
+            try await mock.stub(
+                FailingMockCustomizationRequest(),
+                with: EmptyResponse()
+            )
+            Issue.record("Expected request customization to fail")
+        } catch let error as NetworkError {
+            guard case .requestConfigurationFailed(let underlying) = error else {
+                Issue.record("Expected requestConfigurationFailed, got \(error)")
+                return
+            }
+            #expect(underlying is MockFixtureError)
+        }
     }
 
     @Test("Missing-stub diagnostics are localized")
@@ -548,6 +628,22 @@ private struct OrderedQueryRequest: Request {
     }
 }
 
+private struct CustomizedMockRequest: Request {
+    typealias ReturnType = TestUser
+
+    let token: String
+    let path = "customized"
+    let method = HTTPMethod.post
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        urlRequest.url?.append(queryItems: [
+            URLQueryItem(name: "token", value: token)
+        ])
+        urlRequest.httpBody = Data(token.utf8)
+        urlRequest.setValue(token, forHTTPHeaderField: "X-Signature")
+    }
+}
+
 private struct FailingMockEncodingRequest: Request {
     typealias ReturnType = EmptyResponse
 
@@ -575,6 +671,16 @@ private struct CancellingMockEncodingRequest: Request {
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         throw CancellationError()
+    }
+}
+
+private struct FailingMockCustomizationRequest: Request {
+    typealias ReturnType = EmptyResponse
+
+    let path = "failing-customization"
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        throw MockFixtureError.exact
     }
 }
 

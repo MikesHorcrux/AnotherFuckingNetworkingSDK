@@ -22,6 +22,7 @@ struct PublicAPISurfaceTests {
             (.invalidURL, "URL"),
             (.invalidResponse, "non-HTTP"),
             (.encodingFailed(underlying), "fixture detail"),
+            (.requestConfigurationFailed(underlying), "fixture detail"),
             (.transport(URLError(.timedOut)), "response"),
             (.requestFailed(statusCode: 429, data: nil), "429"),
             (.emptyResponse(statusCode: 204), "204"),

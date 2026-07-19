@@ -13,6 +13,8 @@ public struct RecordedRequest: Equatable, Sendable {
     public let operation: MockRequestOperation
     public let requestTypeID: ObjectIdentifier
     public let requestTypeName: String
+
+    /// The request's declared HTTP method before final customization.
     public let method: HTTPMethod
 
     /// The final URL after custom URL construction and pagination are applied.
@@ -23,21 +25,17 @@ public struct RecordedRequest: Equatable, Sendable {
 
     /// Query items from ``url``, including pagination items for page sends.
     public let queryItems: [URLQueryItem]
+
+    /// Final request headers after ``Request/customize(_:)``, keyed by
+    /// lowercase field name.
     public let headers: [String: String]
 
-    /// The body returned by ``Request/makeBody(using:)``.
+    /// Final in-memory body after ``Request/customize(_:)``.
     public let body: Data?
     public let page: Int?
     public let pageSize: Int?
 
-    /// Creates a mock whose request construction mirrors a production client.
-    ///
-    /// - Parameters:
-    ///   - baseURL: The URL used by request URL builders. Defaults to an
-    ///     isolated `https://mock.invalid` origin.
-    ///   - encoderFactory: Creates the encoder used for matching and recording.
-    ///   - delay: An optional simulated delay in seconds.
-    ///   - sleeper: The wait implementation, injectable for deterministic tests.
+    /// Creates a structured record of one mock client invocation.
     public init(
         sequenceID: Int,
         operation: MockRequestOperation,
@@ -86,7 +84,7 @@ public enum MockAPIClientError: LocalizedError, Equatable, Sendable {
 ///
 /// Exact request stubs take precedence over type-wide defaults. Request and
 /// page operations have separate registries, and missing stubs always throw.
-public actor MockAPIClient: APIClientProtocol {
+public actor MockAPIClient: APIClientResponseProtocol {
     public typealias Sleeper = @Sendable (UInt64) async throws -> Void
 
     public private(set) var recordedRequests: [RecordedRequest] = []
@@ -103,12 +101,23 @@ public actor MockAPIClient: APIClientProtocol {
 
     private var stubs: [StubKey: Stub] = [:]
     private let baseURL: URL
+    private let globalHeaders: [String: String]
     private let encoderFactory: APIClient.EncoderFactory
     private var delayNanoseconds: UInt64
     private let sleeper: Sleeper
 
+    /// Creates a mock whose request construction mirrors a production client.
+    ///
+    /// - Parameters:
+    ///   - baseURL: The URL used by request URL builders. Defaults to an
+    ///     isolated `https://mock.invalid` origin.
+    ///   - globalHeaders: Headers applied before request-specific overrides.
+    ///   - encoderFactory: Creates the encoder used for matching and recording.
+    ///   - delay: An optional simulated delay in seconds.
+    ///   - sleeper: The wait implementation, injectable for deterministic tests.
     public init(
         baseURL: URL? = nil,
+        globalHeaders: [String: String] = [:],
         encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
         delay: TimeInterval = 0,
         sleeper: @escaping Sleeper = { nanoseconds in
@@ -116,6 +125,7 @@ public actor MockAPIClient: APIClientProtocol {
         }
     ) {
         self.baseURL = baseURL ?? URL(string: "https://mock.invalid")!
+        self.globalHeaders = globalHeaders
         self.encoderFactory = encoderFactory
         delayNanoseconds = Self.nanoseconds(for: delay)
         self.sleeper = sleeper
@@ -127,28 +137,92 @@ public actor MockAPIClient: APIClientProtocol {
         _ requestType: R.Type,
         with response: R.ReturnType
     ) {
-        stubs[.type(requestType, operation: .request)] = .success(response)
+        stubs[.type(requestType, operation: .request)] = .success(
+            response,
+            data: (response as? Data) ?? Data(),
+            metadata: nil
+        )
     }
 
     public func stub<R: Request>(
         _ request: R,
         with response: R.ReturnType
     ) throws {
-        stubs[try exactKey(for: request, operation: .request)] = .success(response)
+        stubs[try exactKey(for: request, operation: .request)] = .success(
+            response,
+            data: (response as? Data) ?? Data(),
+            metadata: nil
+        )
     }
 
     public func stubPage<R: PaginatedRequest>(
         _ requestType: R.Type,
         with response: PaginatedResponse<R.ReturnType>
     ) {
-        stubs[.type(requestType, operation: .page)] = .success(response)
+        stubs[.type(requestType, operation: .page)] = .success(
+            response,
+            data: Data(),
+            metadata: nil
+        )
     }
 
     public func stubPage<R: PaginatedRequest>(
         _ request: R,
         with response: PaginatedResponse<R.ReturnType>
     ) throws {
-        stubs[try exactKey(for: request, operation: .page)] = .success(response)
+        stubs[try exactKey(for: request, operation: .page)] = .success(
+            response,
+            data: Data(),
+            metadata: nil
+        )
+    }
+
+    /// Registers a response value together with deterministic HTTP metadata.
+    public func stubResponse<R: Request>(
+        _ requestType: R.Type,
+        with response: HTTPResponse<R.ReturnType>
+    ) {
+        stubs[.type(requestType, operation: .request)] = .success(
+            response.value,
+            data: response.data,
+            metadata: response.metadata
+        )
+    }
+
+    /// Registers exact response metadata for one fully constructed request.
+    public func stubResponse<R: Request>(
+        _ request: R,
+        with response: HTTPResponse<R.ReturnType>
+    ) throws {
+        stubs[try exactKey(for: request, operation: .request)] = .success(
+            response.value,
+            data: response.data,
+            metadata: response.metadata
+        )
+    }
+
+    /// Registers a paginated value together with deterministic HTTP metadata.
+    public func stubPageResponse<R: PaginatedRequest>(
+        _ requestType: R.Type,
+        with response: HTTPResponse<PaginatedResponse<R.ReturnType>>
+    ) {
+        stubs[.type(requestType, operation: .page)] = .success(
+            response.value,
+            data: response.data,
+            metadata: response.metadata
+        )
+    }
+
+    /// Registers exact response metadata for one paginated request.
+    public func stubPageResponse<R: PaginatedRequest>(
+        _ request: R,
+        with response: HTTPResponse<PaginatedResponse<R.ReturnType>>
+    ) throws {
+        stubs[try exactKey(for: request, operation: .page)] = .success(
+            response.value,
+            data: response.data,
+            metadata: response.metadata
+        )
     }
 
     // MARK: Failure stubs
@@ -252,6 +326,12 @@ public actor MockAPIClient: APIClientProtocol {
     // MARK: APIClientProtocol
 
     public func send<R: Request>(_ request: R) async throws -> R.ReturnType {
+        try await sendResponse(request).value
+    }
+
+    public func sendResponse<R: Request>(
+        _ request: R
+    ) async throws -> HTTPResponse<R.ReturnType> {
         try Task.checkCancellation()
         let context = try makeContext(for: request, operation: .request)
         let invocation = record(request, operation: .request, context: context)
@@ -269,11 +349,18 @@ public actor MockAPIClient: APIClientProtocol {
         }
 
         switch resolvedStub {
-        case .success(let value):
+        case .success(let value, let data, let metadata):
             guard let response = value as? R.ReturnType else {
                 throw MockAPIClientError.responseTypeMismatch(invocation)
             }
-            return response
+            return HTTPResponse(
+                value: response,
+                data: data,
+                metadata: metadata ?? HTTPResponseMetadata(
+                    statusCode: 200,
+                    url: context.url
+                )
+            )
         case .failure(let error):
             throw error
         }
@@ -282,6 +369,12 @@ public actor MockAPIClient: APIClientProtocol {
     public func sendPage<R: PaginatedRequest>(
         _ request: R
     ) async throws -> PaginatedResponse<R.ReturnType> {
+        try await sendPageResponse(request).value
+    }
+
+    public func sendPageResponse<R: PaginatedRequest>(
+        _ request: R
+    ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>> {
         try Task.checkCancellation()
         let context = try makeContext(for: request, operation: .page)
         let invocation = record(request, operation: .page, context: context)
@@ -299,11 +392,18 @@ public actor MockAPIClient: APIClientProtocol {
         }
 
         switch resolvedStub {
-        case .success(let value):
+        case .success(let value, let data, let metadata):
             guard let response = value as? PaginatedResponse<R.ReturnType> else {
                 throw MockAPIClientError.responseTypeMismatch(invocation)
             }
-            return response
+            return HTTPResponse(
+                value: response,
+                data: data,
+                metadata: metadata ?? HTTPResponseMetadata(
+                    statusCode: 200,
+                    url: context.url
+                )
+            )
         case .failure(let error):
             throw error
         }
@@ -342,19 +442,41 @@ public actor MockAPIClient: APIClientProtocol {
             throw NetworkError.invalidURL
         }
 
-        let body: Data?
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = request.method.rawValue
+
+        let headers = Self.mergingHeaders(
+            defaults: globalHeaders,
+            overrides: request.headers ?? [:]
+        )
+        for (name, value) in headers {
+            urlRequest.setValue(value, forHTTPHeaderField: name)
+        }
+
         do {
-            body = try request.makeBody(using: encoderFactory())
+            urlRequest.httpBody = try request.makeBody(using: encoderFactory())
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             throw NetworkError.encodingFailed(error)
         }
 
+        do {
+            try request.customize(&urlRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.requestConfigurationFailed(error)
+        }
+
+        guard let configuredURL = urlRequest.url else {
+            throw NetworkError.invalidURL
+        }
+
         return RequestContext(
-            url: url,
-            body: body,
-            signature: Signature(request, url: url, body: body)
+            urlRequest: urlRequest,
+            url: configuredURL,
+            signature: Signature(request, urlRequest: urlRequest)
         )
     }
 
@@ -411,13 +533,36 @@ public actor MockAPIClient: APIClientProtocol {
                 url: context.url,
                 resolvingAgainstBaseURL: false
             )?.queryItems ?? [],
-            headers: request.headers ?? [:],
+            headers: Self.normalizedHeaders(
+                context.urlRequest.allHTTPHeaderFields ?? [:]
+            ),
             body: context.body,
             page: paginated?.page,
             pageSize: paginated?.pageSize
         )
         recordedRequests.append(invocation)
         return invocation
+    }
+
+    private static func normalizedHeaders(
+        _ headers: [String: String]
+    ) -> [String: String] {
+        var normalized: [String: String] = [:]
+        for name in headers.keys.sorted() {
+            normalized[name.lowercased()] = headers[name]
+        }
+        return normalized
+    }
+
+    private static func mergingHeaders(
+        defaults: [String: String],
+        overrides: [String: String]
+    ) -> [String: String] {
+        var result = normalizedHeaders(defaults)
+        for (name, value) in normalizedHeaders(overrides) {
+            result[name] = value
+        }
+        return result
     }
 
     private static func nanoseconds(for delay: TimeInterval) -> UInt64 {
@@ -430,14 +575,20 @@ public actor MockAPIClient: APIClientProtocol {
 
 private extension MockAPIClient {
     enum Stub: Sendable {
-        case success(any Sendable)
+        case success(
+            any Sendable,
+            data: Data,
+            metadata: HTTPResponseMetadata?
+        )
         case failure(any Error)
     }
 
     struct RequestContext: Sendable {
+        let urlRequest: URLRequest
         let url: URL
-        let body: Data?
         let signature: Signature
+
+        var body: Data? { urlRequest.httpBody }
     }
 
     struct StubKey: Hashable, Sendable {
@@ -470,20 +621,20 @@ private extension MockAPIClient {
     }
 
     struct Signature: Hashable, Sendable {
-        let method: HTTPMethod
+        let method: String?
         let url: String
         let headers: [KeyValue]
         let body: Data?
         let page: Int?
         let pageSize: Int?
 
-        init<R: Request>(_ request: R, url: URL, body: Data?) {
-            method = request.method
-            self.url = url.absoluteString
-            headers = (request.headers ?? [:])
+        init<R: Request>(_ request: R, urlRequest: URLRequest) {
+            method = urlRequest.httpMethod
+            url = urlRequest.url?.absoluteString ?? ""
+            headers = (urlRequest.allHTTPHeaderFields ?? [:])
                 .map { KeyValue(key: $0.key.lowercased(), value: $0.value) }
                 .sorted()
-            self.body = body
+            body = urlRequest.httpBody
 
             if let paginated = request as? any PaginatedRequest {
                 page = paginated.page
