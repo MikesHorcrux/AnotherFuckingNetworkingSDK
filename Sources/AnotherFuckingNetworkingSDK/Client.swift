@@ -20,12 +20,34 @@ public protocol APIClientResponseProtocol: APIClientProtocol {
     ) async throws -> HTTPResponse<PaginatedResponse<R.ReturnType>>
 }
 
+/// An API client that can upload memory or files and download directly to disk.
+public protocol APIClientTransferProtocol: APIClientResponseProtocol {
+    func upload<R: Request>(
+        _ request: R,
+        from body: UploadBody
+    ) async throws -> HTTPResponse<R.ReturnType>
+
+    func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination
+    ) async throws -> DownloadResponse
+}
+
+public extension APIClientTransferProtocol {
+    /// Downloads to a unique temporary file owned by the caller.
+    func download<R: DownloadRequest>(
+        _ request: R
+    ) async throws -> DownloadResponse {
+        try await download(request, to: .temporary)
+    }
+}
+
 /// A URLSession-backed API client.
 ///
 /// Configuration mutations are synchronized. Each request takes one atomic
 /// configuration snapshot before doing any work, so an in-flight request never
 /// observes a partially updated base URL, header set, or codec configuration.
-public final class APIClient: APIClientResponseProtocol, Sendable {
+public final class APIClient: APIClientTransferProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
 
@@ -117,58 +139,14 @@ public final class APIClient: APIClientResponseProtocol, Sendable {
             request,
             configuration: configuration
         )
-        try Task.checkCancellation()
-        logger?.log(request: urlRequest)
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await urlSession.data(for: urlRequest)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError {
-            if error.code == .cancelled, Task.isCancelled {
-                throw CancellationError()
-            }
-            throw NetworkError.transport(error)
-        } catch {
-            throw NetworkError.unknown(error)
+        let (data, httpResponse) = try await performDataRequest(urlRequest) {
+            try await self.urlSession.data(for: urlRequest)
         }
-
-        try Task.checkCancellation()
-        logger?.log(response: response, data: data)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NetworkError.invalidResponse
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw NetworkError.requestFailed(
-                statusCode: httpResponse.statusCode,
-                data: data
-            )
-        }
-
-        let value: R.ReturnType
-        do {
-            value = try Self.decode(
-                request,
-                data: data,
-                response: httpResponse,
-                decoder: configuration.decoderFactory()
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as NetworkError {
-            throw error
-        } catch {
-            throw NetworkError.decodingFailed(error)
-        }
-
-        return HTTPResponse(
-            value: value,
+        return try Self.makeResponse(
+            request,
             data: data,
-            metadata: HTTPResponseMetadata(httpResponse)
+            response: httpResponse,
+            configuration: configuration
         )
     }
 
@@ -187,9 +165,118 @@ public final class APIClient: APIClientResponseProtocol, Sendable {
         return try await sendResponse(wrapper)
     }
 
-    private static func makeURLRequest<R: Request>(
+    /// Uploads bytes with a URLSession upload task and decodes the response.
+    public func upload<R: Request>(
         _ request: R,
-        configuration: Configuration
+        from body: UploadBody
+    ) async throws -> HTTPResponse<R.ReturnType> {
+        try Task.checkCancellation()
+        let configuration = state.withLock { $0 }
+
+        let bodySource: RequestBodySource
+        switch body {
+        case .data(let data):
+            bodySource = .provided(data)
+        case .file(let fileURL):
+            try Self.validateUploadSource(fileURL)
+            bodySource = .provided(nil)
+        }
+
+        let urlRequest = try Self.makeURLRequest(
+            request,
+            configuration: configuration,
+            bodySource: bodySource
+        )
+
+        let result: (Data, HTTPURLResponse)
+        switch body {
+        case .data(let data):
+            result = try await performDataRequest(urlRequest) {
+                try await self.urlSession.upload(for: urlRequest, from: data)
+            }
+        case .file(let fileURL):
+            result = try await performDataRequest(urlRequest) {
+                try await self.urlSession.upload(for: urlRequest, fromFile: fileURL)
+            }
+        }
+
+        return try Self.makeResponse(
+            request,
+            data: result.0,
+            response: result.1,
+            configuration: configuration
+        )
+    }
+
+    /// Downloads a response body directly to a durable file location.
+    public func download<R: DownloadRequest>(
+        _ request: R,
+        to destination: DownloadDestination
+    ) async throws -> DownloadResponse {
+        try Task.checkCancellation()
+        try Self.validateDownloadDestination(destination)
+        let configuration = state.withLock { $0 }
+        let urlRequest = try Self.makeURLRequest(
+            request,
+            configuration: configuration
+        )
+
+        try Task.checkCancellation()
+        logger?.log(request: urlRequest)
+
+        let temporaryURL: URL
+        let response: URLResponse
+        do {
+            (temporaryURL, response) = try await urlSession.download(for: urlRequest)
+        } catch {
+            try Self.throwTransportError(error)
+        }
+
+        try Task.checkCancellation()
+        guard let httpResponse = response as? HTTPURLResponse else {
+            logger?.log(response: response, data: Data())
+            throw NetworkError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let errorData = Self.readDownloadErrorData(at: temporaryURL)
+            logger?.log(response: response, data: errorData ?? Data())
+            throw NetworkError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                data: errorData
+            )
+        }
+
+        logger?.log(response: response, data: Data())
+        let storedURL: URL
+        do {
+            storedURL = try Self.storeDownloadedFile(
+                at: temporaryURL,
+                destination: destination
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as NetworkError {
+            throw error
+        } catch {
+            throw NetworkError.fileOperationFailed(error)
+        }
+
+        return DownloadResponse(
+            fileURL: storedURL,
+            metadata: HTTPResponseMetadata(httpResponse)
+        )
+    }
+
+    private enum RequestBodySource: Sendable {
+        case encoded
+        case provided(Data?)
+    }
+
+    private static func makeURLRequest<R: HTTPRequest>(
+        _ request: R,
+        configuration: Configuration,
+        bodySource: RequestBodySource = .encoded
     ) throws -> URLRequest {
         guard let baseURL = configuration.baseURL,
               let url = request.makeURL(baseURL: baseURL) else {
@@ -207,12 +294,19 @@ public final class APIClient: APIClientResponseProtocol, Sendable {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 
-        do {
-            urlRequest.httpBody = try request.makeBody(using: configuration.encoderFactory())
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw NetworkError.encodingFailed(error)
+        switch bodySource {
+        case .encoded:
+            do {
+                urlRequest.httpBody = try request.makeBody(
+                    using: configuration.encoderFactory()
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw NetworkError.encodingFailed(error)
+            }
+        case .provided(let data):
+            urlRequest.httpBody = data
         }
 
         do {
@@ -224,6 +318,178 @@ public final class APIClient: APIClientResponseProtocol, Sendable {
         }
 
         return urlRequest
+    }
+
+    private func performDataRequest(
+        _ urlRequest: URLRequest,
+        operation: @Sendable () async throws -> (Data, URLResponse)
+    ) async throws -> (Data, HTTPURLResponse) {
+        try Task.checkCancellation()
+        logger?.log(request: urlRequest)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await operation()
+        } catch {
+            try Self.throwTransportError(error)
+        }
+
+        try Task.checkCancellation()
+        logger?.log(response: response, data: data)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw NetworkError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                data: data
+            )
+        }
+
+        return (data, httpResponse)
+    }
+
+    private static func makeResponse<R: Request>(
+        _ request: R,
+        data: Data,
+        response: HTTPURLResponse,
+        configuration: Configuration
+    ) throws -> HTTPResponse<R.ReturnType> {
+        let value: R.ReturnType
+        do {
+            value = try decode(
+                request,
+                data: data,
+                response: response,
+                decoder: configuration.decoderFactory()
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as NetworkError {
+            throw error
+        } catch {
+            throw NetworkError.decodingFailed(error)
+        }
+
+        return HTTPResponse(
+            value: value,
+            data: data,
+            metadata: HTTPResponseMetadata(response)
+        )
+    }
+
+    private static func throwTransportError(
+        _ error: any Error
+    ) throws -> Never {
+        if error is CancellationError {
+            throw CancellationError()
+        }
+        if let urlError = error as? URLError {
+            if urlError.code == .cancelled, Task.isCancelled {
+                throw CancellationError()
+            }
+            throw NetworkError.transport(urlError)
+        }
+        throw NetworkError.unknown(error)
+    }
+
+    private static func validateDownloadDestination(
+        _ destination: DownloadDestination
+    ) throws {
+        guard case .file(let url, let overwriteExisting) = destination else {
+            return
+        }
+        guard url.isFileURL else {
+            throw NetworkError.fileOperationFailed(
+                FileTransferError.destinationIsNotFileURL(url)
+            )
+        }
+        if !overwriteExisting, FileManager.default.fileExists(atPath: url.path) {
+            throw NetworkError.fileOperationFailed(
+                FileTransferError.destinationAlreadyExists(url)
+            )
+        }
+    }
+
+    private static func validateUploadSource(_ url: URL) throws {
+        guard url.isFileURL else {
+            throw NetworkError.fileOperationFailed(
+                FileTransferError.sourceIsNotFileURL(url)
+            )
+        }
+
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(
+            atPath: url.path,
+            isDirectory: &isDirectory
+        ) else {
+            throw NetworkError.fileOperationFailed(
+                FileTransferError.sourceDoesNotExist(url)
+            )
+        }
+        guard !isDirectory.boolValue,
+              FileManager.default.isReadableFile(atPath: url.path) else {
+            throw NetworkError.fileOperationFailed(
+                FileTransferError.sourceIsNotReadableFile(url)
+            )
+        }
+    }
+
+    private static func storeDownloadedFile(
+        at temporaryURL: URL,
+        destination: DownloadDestination
+    ) throws -> URL {
+        let fileManager = FileManager.default
+
+        switch destination {
+        case .temporary:
+            let directory = fileManager.temporaryDirectory
+                .appendingPathComponent(
+                    "AnotherFuckingNetworkingSDK-Downloads",
+                    isDirectory: true
+                )
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let destinationURL = directory.appendingPathComponent(
+                UUID().uuidString,
+                isDirectory: false
+            )
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+            return destinationURL
+
+        case .file(let destinationURL, let overwriteExisting):
+            guard destinationURL.isFileURL else {
+                throw FileTransferError.destinationIsNotFileURL(destinationURL)
+            }
+
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                guard overwriteExisting else {
+                    throw FileTransferError.destinationAlreadyExists(destinationURL)
+                }
+                _ = try fileManager.replaceItemAt(
+                    destinationURL,
+                    withItemAt: temporaryURL
+                )
+            } else {
+                try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+            }
+            return destinationURL
+        }
+    }
+
+    /// Avoids loading an unexpectedly huge failed download into memory.
+    private static func readDownloadErrorData(at url: URL) -> Data? {
+        let maximumBytes = 1_048_576
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize,
+              fileSize <= maximumBytes else {
+            return nil
+        }
+        return try? Data(contentsOf: url)
     }
 
     private static func decode<R: Request>(

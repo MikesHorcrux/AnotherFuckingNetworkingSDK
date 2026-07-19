@@ -1,6 +1,6 @@
 # AnotherFuckingNetworkingSDK
 
-A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
+A small, zero-dependency networking package for Swift 6. It provides typed requests, async URLSession transport, memory- and file-backed uploads, disk-backed downloads, response metadata and raw payloads, page-number pagination, explicit empty responses, safe opt-in diagnostics, and a separate actor-based testing library.
 
 ## Requirements
 
@@ -200,6 +200,51 @@ let imageData = try await client.send(
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
+## Uploads and downloads
+
+`APIClient` uses URLSession upload tasks for both in-memory data and files. The upload response is decoded like an ordinary request and includes HTTP metadata:
+
+```swift
+struct UploadAvatarRequest: Request {
+    typealias ReturnType = User
+
+    let userID: Int
+    var path: String { "users/\(userID)/avatar" }
+    var method: HTTPMethod { .put }
+    var headers: [String: String]? {
+        ["Content-Type": "image/jpeg"]
+    }
+}
+
+let response = try await client.upload(
+    UploadAvatarRequest(userID: 42),
+    from: .file(localImageURL)
+)
+```
+
+Use `.data(payload)` for bytes already in memory. The supplied upload body replaces `Request.body` and bypasses `makeBody(using:)`. Data uploads expose those bytes to `customize(_:)` for signing; file uploads remain file-backed and do not copy their contents into the prepared `URLRequest`.
+
+Downloads use the shared `HTTPRequest` construction surface without requiring an unused decoded response type:
+
+```swift
+struct ExportRequest: DownloadRequest {
+    let exportID: String
+    var path: String { "exports/\(exportID)" }
+}
+
+let download = try await client.download(ExportRequest(exportID: "latest"))
+defer { try? FileManager.default.removeItem(at: download.fileURL) }
+
+print(download.fileURL)
+print(download.statusCode)
+```
+
+The default moves Foundation's ephemeral download into a unique SDK-owned temporary location before returning; the caller owns that file and removes it when finished. To choose the final location, pass `.file(destinationURL, overwriteExisting: false)`. Existing files are preserved unless overwrite is explicitly `true`, and file-location failures are reported as `NetworkError.fileOperationFailed` with a `FileTransferError` when the problem is caller-correctable.
+
+Successful downloads are never loaded into memory. HTTP failure bodies are included in `NetworkError.requestFailed` only when they are at most 1 MiB; larger download error files produce `data == nil`.
+
+These APIs model foreground async transfers. Delegate-owned progress reporting, resumable downloads, and relaunch-safe background sessions require application lifecycle policy and are intentionally separate concerns.
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:
@@ -278,6 +323,8 @@ do {
         print("HTTP \(statusCode) did not contain the expected body")
     case .decodingFailed(let underlying):
         print("Could not decode the response: \(underlying)")
+    case .fileOperationFailed(let underlying):
+        print("Could not read or store a transfer file: \(underlying)")
     case .unknown(let underlying):
         print("Unexpected failure: \(underlying)")
     }
@@ -332,6 +379,8 @@ struct UserService: Sendable {
 ```
 
 Use `any APIClientResponseProtocol` instead when the service calls `sendResponse(_:)` or `sendPageResponse(_:)`. Both `APIClient` and `MockAPIClient` conform.
+
+Services that upload or download can depend on `any APIClientTransferProtocol`.
 
 ## Testing support
 
@@ -426,12 +475,13 @@ Version 2 is a deliberate major-version modernization:
 - Expect missing page stubs to throw instead of returning an empty page.
 - Handle `.transport`, `.encodingFailed`, `.invalidResponse`, and `.emptyResponse` in `NetworkError` switches.
 - Handle `.requestConfigurationFailed` when request customization is used.
+- Handle `.fileOperationFailed` when using file-backed transfers.
 - Handle `CancellationError` separately.
 - Pass `NetworkingLogger` explicitly when diagnostics are wanted.
 - Move app-specific sample models out of the SDK namespace.
 - Replace the removed general-purpose dictionary merge and nonce helpers with app-owned utilities.
 
-The familiar `send`, `sendPage`, `ReturnType`, `APIClient.shared`, `baseURL`, `globalHeaders`, and pre-encoded `body` APIs remain available. `ReturnType` no longer needs to be `Decodable` when a request supplies custom decoding.
+The familiar `send`, `sendPage`, `ReturnType`, `APIClient.shared`, `baseURL`, `globalHeaders`, and pre-encoded `body` APIs remain available. `ReturnType` no longer needs to be `Decodable` when a request supplies custom decoding. Ordinary `Request` values now inherit their URL construction from `HTTPRequest`, which also powers `DownloadRequest`.
 
 ## Development
 

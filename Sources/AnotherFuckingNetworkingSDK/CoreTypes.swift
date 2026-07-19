@@ -15,10 +15,10 @@ public enum HTTPMethod: String, CaseIterable, Sendable {
 
 /// Describes whether a request path still needs percent encoding.
 public enum RequestPathEncoding: Sendable {
-    /// Treat ``Request/path`` as decoded text and percent encode it.
+    /// Treat ``HTTPRequest/path`` as decoded text and percent encode it.
     case decoded
 
-    /// Treat ``Request/path`` as an already percent-encoded path.
+    /// Treat ``HTTPRequest/path`` as an already percent-encoded path.
     case percentEncoded
 }
 
@@ -34,6 +34,7 @@ public enum NetworkError: LocalizedError, Sendable {
     case requestFailed(statusCode: Int, data: Data?)
     case emptyResponse(statusCode: Int)
     case decodingFailed(any Error)
+    case fileOperationFailed(any Error)
     case unknown(any Error)
 
     public var errorDescription: String? {
@@ -54,18 +55,18 @@ public enum NetworkError: LocalizedError, Sendable {
             return "The server returned an empty HTTP \(statusCode) response."
         case .decodingFailed(let error):
             return "The response could not be decoded: \(error.localizedDescription)"
+        case .fileOperationFailed(let error):
+            return "A network file operation failed: \(error.localizedDescription)"
         case .unknown(let error):
             return "The request failed unexpectedly: \(error.localizedDescription)"
         }
     }
 }
 
-// MARK: - Request
+// MARK: - HTTPRequest
 
-/// A type-safe description of an HTTP request and its decoded response.
-public protocol Request: Sendable {
-    associatedtype ReturnType: Sendable
-
+/// The shared URL, method, header, and body description for an HTTP operation.
+public protocol HTTPRequest: Sendable {
     /// The endpoint path relative to the client's base URL.
     var path: String { get }
 
@@ -88,10 +89,6 @@ public protocol Request: Sendable {
     /// case-insensitively.
     var headers: [String: String]? { get }
 
-    /// Whether a successful response with no body should be passed to
-    /// ``decode(_:response:using:)``. The default is `false`.
-    var allowsEmptyResponseBody: Bool { get }
-
     /// Builds the final URL from the client's base URL.
     func makeURL(baseURL: URL) -> URL?
 
@@ -104,22 +101,14 @@ public protocol Request: Sendable {
     /// and encoded body. Use it for options such as cache policy, timeout,
     /// cookie handling, or network access constraints.
     func customize(_ urlRequest: inout URLRequest) throws
-
-    /// Decodes a successful response using a fresh decoder from the client configuration.
-    func decode(
-        _ data: Data,
-        response: HTTPURLResponse,
-        using decoder: JSONDecoder
-    ) throws -> ReturnType
 }
 
-public extension Request {
+public extension HTTPRequest {
     var method: HTTPMethod { .get }
     var pathEncoding: RequestPathEncoding { .decoded }
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
-    var allowsEmptyResponseBody: Bool { false }
 
     func makeURL(baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
@@ -202,6 +191,28 @@ public extension Request {
         }
         return result
     }
+}
+
+// MARK: - Request
+
+/// A type-safe HTTP request with a decoded response value.
+public protocol Request: HTTPRequest {
+    associatedtype ReturnType: Sendable
+
+    /// Whether a successful response with no body should be passed to
+    /// ``decode(_:response:using:)``. The default is `false`.
+    var allowsEmptyResponseBody: Bool { get }
+
+    /// Decodes a successful response using a fresh decoder from the client configuration.
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> ReturnType
+}
+
+public extension Request {
+    var allowsEmptyResponseBody: Bool { false }
 }
 
 public extension Request where ReturnType: Decodable {

@@ -148,6 +148,35 @@ struct DocumentationExamplesTests {
             DocumentationGetUserRequest(userID: 42)
         ).statusCode == 200)
     }
+
+    @Test("Upload and download examples compile through the transfer protocol")
+    func fileTransfers() async throws {
+        let stub = StubSession { request in
+            if request.url?.path.contains("avatar") == true {
+                return .respond(try .http(
+                    for: request,
+                    data: Data(#"{"id":42,"displayName":"Arthur"}"#.utf8)
+                ))
+            }
+            return .respond(try .http(
+                for: request,
+                data: Data("export".utf8)
+            ))
+        }
+        let client: any APIClientTransferProtocol = stub.client()
+
+        let upload = try await client.upload(
+            DocumentationUploadAvatarRequest(userID: 42),
+            from: .data(Data("image".utf8))
+        )
+        let download = try await client.download(
+            DocumentationExportRequest(exportID: "latest")
+        )
+        defer { try? FileManager.default.removeItem(at: download.fileURL) }
+
+        #expect(upload.value == DocumentationUser(id: 42, displayName: "Arthur"))
+        #expect(try Data(contentsOf: download.fileURL) == Data("export".utf8))
+    }
 }
 
 private func documentationMessage(for error: NetworkError) -> String {
@@ -168,6 +197,8 @@ private func documentationMessage(for error: NetworkError) -> String {
         return "Empty HTTP \(statusCode)"
     case .decodingFailed:
         return "Decoding failed"
+    case .fileOperationFailed:
+        return "File operation failed"
     case .unknown:
         return "Unknown failure"
     }
@@ -231,6 +262,20 @@ private struct DocumentationRawRequest: RawDataRequest {
     func customize(_ request: inout URLRequest) throws {
         request.timeoutInterval = 120
     }
+}
+
+private struct DocumentationUploadAvatarRequest: Request {
+    typealias ReturnType = DocumentationUser
+
+    let userID: Int
+    var path: String { "users/\(userID)/avatar" }
+    let method = HTTPMethod.put
+    let headers: [String: String]? = ["Content-Type": "image/jpeg"]
+}
+
+private struct DocumentationExportRequest: DownloadRequest {
+    let exportID: String
+    var path: String { "exports/\(exportID)" }
 }
 
 private struct DocumentationUserService: Sendable {
