@@ -173,6 +173,77 @@ struct BackgroundURLSessionTests {
         #expect(resumeData == nil)
     }
 
+    @Test("Resume-data validation supports bounded and strict modes")
+    func resumeDataValidation() throws {
+        let validator = try BackgroundTransferResumeDataValidator(
+            maximumBytes: 128
+        )
+        #expect(try validator.validate(nil) == nil)
+        #expect(try validator.validate(Data([1, 2, 3])) == Data([1, 2, 3]))
+
+        let propertyList = try PropertyListSerialization.data(
+            fromPropertyList: ["resume": "token"],
+            format: .binary,
+            options: 0
+        )
+        #expect(try validator.validate(
+            propertyList,
+            mode: .propertyList
+        ) == propertyList)
+
+        do {
+            _ = try validator.validate(Data(), mode: .bounded)
+            Issue.record("Expected empty resume data to fail")
+        } catch let error as BackgroundTransferResumeDataValidationError {
+            #expect(error == .empty)
+        }
+
+        do {
+            _ = try validator.validate(
+                Data(repeating: 0, count: 129),
+                mode: .bounded
+            )
+            Issue.record("Expected oversized resume data to fail")
+        } catch let error as BackgroundTransferResumeDataValidationError {
+            #expect(error == .tooLarge(maximumBytes: 128, actualBytes: 129))
+        }
+
+        do {
+            _ = try validator.validate(
+                Data([0, 1, 2]),
+                mode: .propertyList
+            )
+            Issue.record("Expected malformed property list to fail")
+        } catch let error as BackgroundTransferResumeDataValidationError {
+            #expect(error == .malformedPropertyList)
+        }
+    }
+
+    @Test("Validated downloads reject malformed resume data before task creation")
+    func validatedDownloadRejectsMalformedData() throws {
+        let adapter = BackgroundURLSessionAdapter(
+            identifier: "com.anotherfuckingnetworkingsdk.validation.\(UUID())"
+        ) { _ in }
+        defer { adapter.invalidateAndCancel() }
+
+        let request = URLRequest(
+            url: URL(string: "https://example.com/large-file")!
+        )
+        do {
+            _ = try adapter.downloadValidated(
+                request,
+                resumeData: Data([0, 1, 2]),
+                mode: .propertyList
+            )
+            Issue.record("Expected malformed resume data to be rejected")
+        } catch let error as BackgroundTransferResumeDataValidationError {
+            #expect(error == .malformedPropertyList)
+        }
+
+        let task = try adapter.downloadValidated(request)
+        task.cancel()
+    }
+
     @Test("Background task controls report missing relaunch tasks")
     func missingTaskControls() async throws {
         let adapter = BackgroundURLSessionAdapter(

@@ -149,7 +149,9 @@ task identifiers route back to durable jobs. Use `BackgroundTransferEventRouter`
 for actor-isolated collision checks and `BackgroundTransferLifecycleCoordinator`
 to apply callbacks. Supply an explicit destination committer and do not mark
 success until it completes. Do not pretend a foreground convenience task is
-durable.
+durable. Validate persisted resume data with
+`BackgroundTransferResumeDataValidator`; use its default bounded mode for
+forward compatibility and `.propertyList` only as an opt-in integrity check.
 
 ### WebSockets and Observation
 

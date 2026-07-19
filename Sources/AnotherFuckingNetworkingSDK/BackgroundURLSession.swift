@@ -75,6 +75,93 @@ public struct BackgroundTransferTaskDescriptor: Codable, Equatable, Sendable {
     }
 }
 
+/// Selects how strictly opaque Foundation resume data is checked.
+public enum BackgroundTransferResumeDataValidationMode: Sendable {
+    /// Check only the non-empty and bounded contract. This is the compatible
+    /// default because Foundation owns the opaque resume-data format.
+    case bounded
+
+    /// Also require a property-list root, matching the current Foundation
+    /// representation while keeping strict validation opt-in for callers.
+    case propertyList
+}
+
+/// Errors raised while validating persisted Foundation resume data.
+public enum BackgroundTransferResumeDataValidationError: LocalizedError,
+    Equatable,
+    Sendable
+{
+    case invalidMaximumBytes(Int)
+    case empty
+    case tooLarge(maximumBytes: Int, actualBytes: Int)
+    case malformedPropertyList
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidMaximumBytes(let value):
+            return "The resume-data maximum must be positive, not \(value)."
+        case .empty:
+            return "Background resume data cannot be empty."
+        case .tooLarge(let maximumBytes, let actualBytes):
+            return "Background resume data is \(actualBytes) bytes; the maximum is \(maximumBytes)."
+        case .malformedPropertyList:
+            return "Background resume data is not a valid property list."
+        }
+    }
+}
+
+/// Validates bounded, opaque Foundation resume data before persistence or
+/// relaunch. The default mode preserves forward compatibility with future
+/// Foundation formats; property-list validation is available as an opt-in
+/// integrity check when the application controls its stored data.
+public struct BackgroundTransferResumeDataValidator: Sendable, Equatable {
+    public static let defaultMaximumBytes = 8 * 1_024 * 1_024
+
+    public let maximumBytes: Int
+
+    public init(
+        maximumBytes: Int = BackgroundTransferResumeDataValidator.defaultMaximumBytes
+    ) throws {
+        guard maximumBytes > 0 else {
+            throw BackgroundTransferResumeDataValidationError.invalidMaximumBytes(
+                maximumBytes
+            )
+        }
+        self.maximumBytes = maximumBytes
+    }
+
+    /// Returns the original value after applying the selected validation.
+    public func validate(
+        _ data: Data?,
+        mode: BackgroundTransferResumeDataValidationMode = .bounded
+    ) throws -> Data? {
+        guard let data else { return nil }
+        guard !data.isEmpty else {
+            throw BackgroundTransferResumeDataValidationError.empty
+        }
+        guard data.count <= maximumBytes else {
+            throw BackgroundTransferResumeDataValidationError.tooLarge(
+                maximumBytes: maximumBytes,
+                actualBytes: data.count
+            )
+        }
+
+        if case .propertyList = mode {
+            do {
+                _ = try PropertyListSerialization.propertyList(
+                    from: data,
+                    options: [],
+                    format: nil
+                )
+            } catch {
+                throw BackgroundTransferResumeDataValidationError
+                    .malformedPropertyList
+            }
+        }
+        return data
+    }
+}
+
 /// Errors raised when an app-owned background task control cannot be applied.
 public enum BackgroundTransferTaskControlError: LocalizedError,
     Equatable,
@@ -262,6 +349,26 @@ public final class BackgroundURLSessionAdapter: Sendable {
         configure(task, jobID: jobID)
         task.resume()
         return task
+    }
+
+    /// Validates optional resume data before creating a Foundation download
+    /// task. Use `.propertyList` only when the application wants strict
+    /// integrity checking for the current Foundation representation.
+    public func downloadValidated(
+        _ request: URLRequest,
+        resumeData: Data? = nil,
+        jobID: UUID? = nil,
+        mode: BackgroundTransferResumeDataValidationMode = .bounded
+    ) throws -> URLSessionDownloadTask {
+        let validated = try BackgroundTransferResumeDataValidator().validate(
+            resumeData,
+            mode: mode
+        )
+        return download(
+            request,
+            resumeData: validated,
+            jobID: jobID
+        )
     }
 
     /// Returns the tasks currently owned by the background session.

@@ -119,6 +119,26 @@ try await adapter.resume(taskIdentifier: taskID)
 try await adapter.cancel(taskIdentifier: taskID)
 ```
 
+Use `BackgroundTransferResumeDataValidator` before persisting data resolved
+from an application database or a relaunch callback. Its default `.bounded`
+mode enforces the SDK's non-empty and 8 MiB maximum without depending on a
+private Foundation format. The opt-in `.propertyList` mode additionally checks
+the current Foundation representation:
+
+```swift
+let validator = try BackgroundTransferResumeDataValidator()
+let resumeData = try validator.validate(
+    job.resumeData,
+    mode: .propertyList
+)
+_ = try await coordinator.pause(id: job.id, resumeData: resumeData)
+```
+
+Treat resume data as opaque, sensitive transport state. Strict property-list
+validation is an integrity check, not a guarantee that the server still
+supports byte-range resumption; the next Foundation task remains the
+authoritative compatibility check.
+
 `BackgroundTransferTaskControlError.taskNotFound` makes a task disappearing
 between inventory and control an explicit reconciliation event. Attempting to
 pause an upload throws `.notDownloadTask` rather than pretending resume data
