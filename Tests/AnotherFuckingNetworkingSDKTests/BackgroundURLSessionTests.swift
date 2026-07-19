@@ -4,6 +4,21 @@ import Testing
 
 @Suite("Background URLSession adapter")
 struct BackgroundURLSessionTests {
+    @Test("Background metrics events retain only the stable snapshot")
+    func metricsEventIsSendableAndEquatable() {
+        let snapshot = NetworkTaskMetricsSnapshot(
+            fetchStart: Date(timeIntervalSince1970: 1),
+            responseEnd: Date(timeIntervalSince1970: 2),
+            requestDurationNanoseconds: 1_000
+        )
+        let event = BackgroundTransferEvent.metrics(
+            taskIdentifier: 7,
+            snapshot: snapshot
+        )
+
+        #expect(event == .metrics(taskIdentifier: 7, snapshot: snapshot))
+    }
+
     @Test("Background completion is delivered after the terminal event")
     func backgroundCompletionOrdering() {
         let events = LockedBox<[BackgroundTransferEvent]>([])

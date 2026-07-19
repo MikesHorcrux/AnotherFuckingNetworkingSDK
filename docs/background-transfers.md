@@ -60,9 +60,10 @@ let task = adapter.download(requestURLRequest, resumeData: job.resumeData)
 ```
 
 The delegate emits bounded progress, temporary download locations, completion
-errors, opaque resume data, and a final `backgroundEventsFinished` event. The
-system completion handler is invoked only after that terminal event. Keep the
-adapter alive for the session's lifetime and route events to the coordinator.
+errors, opaque resume data, privacy-safe task-metrics snapshots, and a final
+`backgroundEventsFinished` event. The system completion handler is invoked only
+after that terminal event. Keep the adapter alive for the session's lifetime
+and route events to the coordinator.
 
 The operation closure is the bridge to the application or a future dedicated
 background product. It receives the restored job and a checkpoint callback.
