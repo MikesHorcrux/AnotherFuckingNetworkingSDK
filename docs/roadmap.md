@@ -42,6 +42,8 @@ roadmap item is not a shipped feature.
   file-backed signing and replay, without materializing the body.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Ordinary HTTP task-metrics telemetry through a delegate-backed data request.
+- HTTP byte-stream task-metrics telemetry through the delegate-aware async bytes
+  API.
 - Transfer delegate task-metrics telemetry with privacy-safe snapshots.
 - WebSocket task-metrics telemetry wired through the injected URLSession
   delegate path.

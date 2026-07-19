@@ -56,6 +56,8 @@ integrating host app.
   path observation, and actor-based testing fixtures.
 - Ordinary HTTP data requests now forward privacy-safe `URLSessionTaskMetrics`
   snapshots alongside the existing transfer and WebSocket metrics events.
+- HTTP byte streams now forward the same task-metrics snapshots while retaining
+  their single-pass lifecycle and cancellation semantics.
 
 ### Evidence and release gates
 
