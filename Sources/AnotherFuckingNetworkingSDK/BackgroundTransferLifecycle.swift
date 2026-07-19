@@ -236,4 +236,58 @@ public actor BackgroundTransferLifecycleCoordinator {
         )
     }
 }
+
+public extension BackgroundTransferLifecycleCoordinator {
+    /// Reconciles task descriptors discovered after process relaunch.
+    ///
+    /// The method validates every descriptor against the restored durable job
+    /// index before binding it. Unknown or identity-less tasks are reported as
+    /// orphans for application cleanup; direction mismatches are reported
+    /// separately and never reach the event router. Existing identical routes
+    /// are reconciled idempotently, while task-ID collisions still throw.
+    @discardableResult
+    func reconcile(
+        _ descriptors: [BackgroundTransferTaskDescriptor]
+    ) async throws -> BackgroundTransferRelaunchReport {
+        var routes: [BackgroundTransferRoute] = []
+        var orphaned: [Int] = []
+        var mismatched: [Int] = []
+
+        for descriptor in descriptors {
+            guard let jobID = descriptor.jobID,
+                  let job = await coordinator.job(id: jobID) else {
+                orphaned.append(descriptor.taskIdentifier)
+                continue
+            }
+
+            let jobIsDownload = job.kind == .download
+            guard descriptor.isDownload == jobIsDownload else {
+                mismatched.append(descriptor.taskIdentifier)
+                continue
+            }
+
+            let route = BackgroundTransferRoute(
+                taskIdentifier: descriptor.taskIdentifier,
+                jobID: job.id,
+                kind: job.kind
+            )
+            try await router.reconcile(route)
+            routes.append(route)
+        }
+
+        return BackgroundTransferRelaunchReport(
+            routes: routes,
+            orphanedTaskIdentifiers: orphaned,
+            mismatchedTaskIdentifiers: mismatched
+        )
+    }
+
+    /// Enumerates and reconciles the adapter's live tasks in one operation.
+    @discardableResult
+    func reconcile(
+        adapter: BackgroundURLSessionAdapter
+    ) async throws -> BackgroundTransferRelaunchReport {
+        try await reconcile(await adapter.transferTasks())
+    }
+}
 #endif

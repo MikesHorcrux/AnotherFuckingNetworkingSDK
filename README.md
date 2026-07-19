@@ -564,6 +564,18 @@ remain application policy. Pass a durable job ID when creating a task and use
 rebuild task-to-job routing. See
 [Background and resumable transfers](docs/background-transfers.md).
 
+`BackgroundTransferLifecycleCoordinator.reconcile(adapter:)` can perform that
+inventory step as one actor-isolated operation. It validates durable identity
+and upload/download direction, binds valid routes idempotently, and returns
+orphaned or mismatched task IDs for explicit app cleanup:
+
+```swift
+let report = try await lifecycle.reconcile(adapter: adapter)
+for taskID in report.orphanedTaskIdentifiers {
+    logger.warning("Ignoring orphaned background task \(taskID)")
+}
+```
+
 For a single durable callback path, compose the router and coordinator with
 `BackgroundTransferLifecycleCoordinator`. It starts restored jobs when the
 first delegate callback arrives, persists monotonic progress, and refuses to

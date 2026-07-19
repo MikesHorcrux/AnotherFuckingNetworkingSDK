@@ -188,6 +188,97 @@ struct BackgroundTransferLifecycleTests {
         #expect(paused.lastError == nil)
     }
 
+    @Test("Relaunch reconciliation validates identity and direction")
+    func relaunchReconciliation() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let download = TransferJob(kind: .download, requestKey: "download")
+        let upload = TransferJob(kind: .upload, requestKey: "upload")
+        try await coordinator.enqueue(download)
+        try await coordinator.enqueue(upload)
+        let lifecycle = BackgroundTransferLifecycleCoordinator(
+            router: BackgroundTransferEventRouter(),
+            coordinator: coordinator,
+            commitDownload: { _, temporaryURL, _ in temporaryURL }
+        )
+
+        let report = try await lifecycle.reconcile([
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 2,
+                jobID: download.id,
+                isDownload: true
+            ),
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 3,
+                jobID: upload.id,
+                isDownload: false
+            ),
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 4,
+                jobID: upload.id,
+                isDownload: true
+            ),
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 5,
+                jobID: nil,
+                isDownload: false
+            ),
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 6,
+                jobID: UUID(),
+                isDownload: false
+            )
+        ])
+
+        #expect(report.routes == [
+            BackgroundTransferRoute(
+                taskIdentifier: 2,
+                jobID: download.id,
+                kind: .download
+            ),
+            BackgroundTransferRoute(
+                taskIdentifier: 3,
+                jobID: upload.id,
+                kind: .upload
+            )
+        ])
+        #expect(report.mismatchedTaskIdentifiers == [4])
+        #expect(report.orphanedTaskIdentifiers == [5, 6])
+    }
+
+    @Test("Relaunch reconciliation keeps task-ID collision diagnostics")
+    func relaunchCollision() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let first = TransferJob(kind: .download, requestKey: "first")
+        let second = TransferJob(kind: .download, requestKey: "second")
+        try await coordinator.enqueue(first)
+        try await coordinator.enqueue(second)
+        let lifecycle = BackgroundTransferLifecycleCoordinator(
+            router: BackgroundTransferEventRouter(),
+            coordinator: coordinator,
+            commitDownload: { _, temporaryURL, _ in temporaryURL }
+        )
+
+        _ = try await lifecycle.reconcile([
+            BackgroundTransferTaskDescriptor(
+                taskIdentifier: 7,
+                jobID: first.id,
+                isDownload: true
+            )
+        ])
+
+        await #expect(throws: BackgroundTransferRouterError.taskAlreadyBound(7)) {
+            try await lifecycle.reconcile([
+                BackgroundTransferTaskDescriptor(
+                    taskIdentifier: 7,
+                    jobID: second.id,
+                    isDownload: true
+                )
+            ])
+        }
+    }
+
     @Test("Malformed callback failures become a safe bounded identity")
     func malformedFailureIsSafe() async throws {
         let store = InMemoryTransferJobStore()

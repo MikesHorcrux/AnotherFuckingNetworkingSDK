@@ -86,6 +86,24 @@ for task in await adapter.transferTasks() {
 }
 ```
 
+The lifecycle coordinator can own this validation and binding step:
+
+```swift
+let report = try await lifecycle.reconcile(adapter: adapter)
+for taskID in report.orphanedTaskIdentifiers {
+    cleanupUnknownTask(taskID)
+}
+for taskID in report.mismatchedTaskIdentifiers {
+    invalidateInconsistentTask(taskID)
+}
+```
+
+`BackgroundTransferRelaunchReport.routes` contains only descriptors that have
+both a durable job and a matching direction. Reconciliation is idempotent for
+the same task/job pair and still throws on a task identifier that is already
+bound to a different job. The SDK does not silently cancel or delete orphaned
+Foundation tasks; the application chooses its cleanup policy.
+
 `BackgroundTransferEvent.taskIdentifier` is available on every task-scoped
 event, while `backgroundEventsFinished` has no task identifier. This makes it
 possible to route progress, metrics, temporary files, and completion events
