@@ -172,4 +172,28 @@ struct BackgroundURLSessionTests {
         #expect(errorDescription == "com.example.transfer (1)")
         #expect(resumeData == nil)
     }
+
+    @Test("Background task controls report missing relaunch tasks")
+    func missingTaskControls() async throws {
+        let adapter = BackgroundURLSessionAdapter(
+            identifier: "com.anotherfuckingnetworkingsdk.controls.\(UUID())"
+        ) { _ in }
+        defer { adapter.invalidateAndCancel() }
+
+        await #expect(throws:
+            BackgroundTransferTaskControlError.taskNotFound(999)
+        ) {
+            try await adapter.pauseDownload(taskIdentifier: 999)
+        }
+        await #expect(throws:
+            BackgroundTransferTaskControlError.taskNotFound(999)
+        ) {
+            try await adapter.cancel(taskIdentifier: 999)
+        }
+        await #expect(throws:
+            BackgroundTransferTaskControlError.taskNotFound(999)
+        ) {
+            try await adapter.resume(taskIdentifier: 999)
+        }
+    }
 }

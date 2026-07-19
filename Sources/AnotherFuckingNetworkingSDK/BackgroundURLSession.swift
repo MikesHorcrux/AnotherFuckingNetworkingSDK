@@ -75,6 +75,24 @@ public struct BackgroundTransferTaskDescriptor: Codable, Equatable, Sendable {
     }
 }
 
+/// Errors raised when an app-owned background task control cannot be applied.
+public enum BackgroundTransferTaskControlError: LocalizedError,
+    Equatable,
+    Sendable
+{
+    case taskNotFound(Int)
+    case notDownloadTask(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .taskNotFound(let taskIdentifier):
+            return "Background task \(taskIdentifier) was not found."
+        case .notDownloadTask(let taskIdentifier):
+            return "Background task \(taskIdentifier) is not a download task."
+        }
+    }
+}
+
 /// A callback-facing delegate for an app-owned background URLSession.
 ///
 /// The delegate emits task identifiers, byte counts, temporary download URLs,
@@ -265,6 +283,37 @@ public final class BackgroundURLSessionAdapter: Sendable {
         }
     }
 
+    /// Cancels a download and returns bounded Foundation resume data when it
+    /// is available. The durable job remains the caller's source of truth.
+    public func pauseDownload(taskIdentifier: Int) async throws -> Data? {
+        let task = try await task(withIdentifier: taskIdentifier)
+        guard let downloadTask = task as? URLSessionDownloadTask else {
+            throw BackgroundTransferTaskControlError.notDownloadTask(
+                taskIdentifier
+            )
+        }
+
+        return await withCheckedContinuation { continuation in
+            downloadTask.cancel { resumeData in
+                continuation.resume(returning: resumeData.flatMap {
+                    $0.count <= transferResumeDataLimitBytes ? $0 : nil
+                })
+            }
+        }
+    }
+
+    /// Cancels a task without asking Foundation to produce resume data.
+    public func cancel(taskIdentifier: Int) async throws {
+        let task = try await task(withIdentifier: taskIdentifier)
+        task.cancel()
+    }
+
+    /// Resumes a task discovered from the current background session.
+    public func resume(taskIdentifier: Int) async throws {
+        let task = try await task(withIdentifier: taskIdentifier)
+        task.resume()
+    }
+
     /// Installs the app delegate's background completion handler.
     public func setBackgroundEventsCompletionHandler(
         _ handler: @escaping BackgroundURLSessionDelegate.CompletionHandler
@@ -278,6 +327,26 @@ public final class BackgroundURLSessionAdapter: Sendable {
 
     public func invalidateAndCancel() {
         session.invalidateAndCancel()
+    }
+
+    private func task(withIdentifier taskIdentifier: Int) async throws
+        -> URLSessionTask {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<URLSessionTask, Error>) in
+            session.getAllTasks { tasks in
+                guard let task = tasks.first(where: {
+                    $0.taskIdentifier == taskIdentifier
+                }) else {
+                    continuation.resume(throwing:
+                        BackgroundTransferTaskControlError.taskNotFound(
+                            taskIdentifier
+                        )
+                    )
+                    return
+                }
+                continuation.resume(returning: task)
+            }
+        }
     }
 
     private func configure(_ task: URLSessionTask, jobID: UUID?) {

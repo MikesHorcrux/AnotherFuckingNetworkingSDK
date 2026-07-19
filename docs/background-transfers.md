@@ -107,6 +107,24 @@ Foundation tasks; the application chooses its cleanup policy.
 Foundation task, which lets the application re-enqueue missing work separately
 from cleaning up orphaned tasks.
 
+Use the adapter's typed controls for relaunch-time task management. Pausing a
+download asks Foundation for resume data and bounds it before returning; the
+caller then persists the data through the durable coordinator:
+
+```swift
+let resumeData = try await adapter.pauseDownload(taskIdentifier: taskID)
+_ = try await coordinator.pause(id: jobID, resumeData: resumeData)
+
+try await adapter.resume(taskIdentifier: taskID)
+try await adapter.cancel(taskIdentifier: taskID)
+```
+
+`BackgroundTransferTaskControlError.taskNotFound` makes a task disappearing
+between inventory and control an explicit reconciliation event. Attempting to
+pause an upload throws `.notDownloadTask` rather than pretending resume data
+exists. The adapter never changes durable job state itself; keep the
+`TransferJobCoordinator` as the single writer.
+
 `BackgroundTransferEvent.taskIdentifier` is available on every task-scoped
 event, while `backgroundEventsFinished` has no task identifier. This makes it
 possible to route progress, metrics, temporary files, and completion events

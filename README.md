@@ -623,6 +623,21 @@ for taskID in report.orphanedTaskIdentifiers {
 non-terminal durable jobs that have no valid live Foundation task and may need
 to be re-enqueued by the application.
 
+After relaunch, use the adapter's typed task controls instead of reaching into
+the raw `URLSession` when pausing or resuming a download:
+
+~~~swift
+let resumeData = try await adapter.pauseDownload(taskIdentifier: taskID)
+try await coordinator.pause(id: jobID, resumeData: resumeData)
+
+try await adapter.resume(taskIdentifier: taskID)
+try await adapter.cancel(taskIdentifier: taskID)
+~~~
+
+Resume data is bounded before it leaves the adapter. Missing task IDs and
+attempts to pause an upload throw `BackgroundTransferTaskControlError`, so a
+relaunch race is observable and can be reconciled against the durable job.
+
 For a single durable callback path, compose the router and coordinator with
 `BackgroundTransferLifecycleCoordinator`. It starts restored jobs when the
 first delegate callback arrives, persists monotonic progress, and refuses to

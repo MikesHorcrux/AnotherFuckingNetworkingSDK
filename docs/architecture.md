@@ -98,6 +98,9 @@ Policies are values or wrappers, not hidden global switches:
   restored durable jobs and separates orphaned tasks from direction
   mismatches before any callback is applied. It also reports non-terminal
   durable jobs with no valid task so recovery can re-enqueue them explicitly.
+- BackgroundTransferTaskControlError and the adapter's async pause/cancel/
+  resume methods make relaunch races explicit while keeping bounded resume data
+  and durable job transitions in separate ownership domains.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 - WebSocketRecoveryAdapter composes an application-owned cursor/session
   protocol with bounded actor-isolated in-memory or atomic JSON state without
