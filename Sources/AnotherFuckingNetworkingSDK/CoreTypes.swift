@@ -13,6 +13,15 @@ public enum HTTPMethod: String, CaseIterable, Sendable {
     case options = "OPTIONS"
 }
 
+/// Describes whether a request path still needs percent encoding.
+public enum RequestPathEncoding: Sendable {
+    /// Treat ``Request/path`` as decoded text and percent encode it.
+    case decoded
+
+    /// Treat ``Request/path`` as an already percent-encoded path.
+    case percentEncoded
+}
+
 // MARK: - NetworkError
 
 /// An error produced while constructing, sending, or decoding a network request.
@@ -57,6 +66,9 @@ public protocol Request: Sendable {
     /// The endpoint path relative to the client's base URL.
     var path: String { get }
 
+    /// How ``path`` should be interpreted. The default is ``RequestPathEncoding/decoded``.
+    var pathEncoding: RequestPathEncoding { get }
+
     /// The HTTP method. The default is ``HTTPMethod/get``.
     var method: HTTPMethod { get }
 
@@ -89,6 +101,7 @@ public protocol Request: Sendable {
 
 public extension Request {
     var method: HTTPMethod { .get }
+    var pathEncoding: RequestPathEncoding { .decoded }
     var queryItems: [URLQueryItem]? { nil }
     var body: Data? { nil }
     var headers: [String: String]? { nil }
@@ -98,13 +111,37 @@ public extension Request {
             return nil
         }
 
-        let basePath = components.path.trimmingCharacters(in: Self.pathSeparators)
-        let endpointPath = path.trimmingCharacters(in: Self.pathSeparators)
-        let joinedPath = [basePath, endpointPath]
-            .filter { !$0.isEmpty }
-            .joined(separator: "/")
+        if !path.isEmpty {
+            let encodedPath: String
+            switch pathEncoding {
+            case .decoded:
+                guard let value = path.addingPercentEncoding(
+                    withAllowedCharacters: .urlPathAllowed
+                ) else {
+                    return nil
+                }
+                encodedPath = value
+            case .percentEncoded:
+                guard Self.isValidPercentEncodedPath(path) else {
+                    return nil
+                }
+                encodedPath = path
+            }
 
-        components.path = joinedPath.isEmpty ? "" : "/\(joinedPath)"
+            let basePath = components.percentEncodedPath
+            let normalizedBase = Self.droppingTrailingSlashes(from: basePath)
+            let normalizedEndpoint = String(encodedPath.drop(while: { $0 == "/" }))
+
+            if normalizedEndpoint.isEmpty {
+                components.percentEncodedPath = normalizedBase.hasSuffix("/")
+                    ? normalizedBase
+                    : "\(normalizedBase)/"
+            } else if normalizedBase.isEmpty {
+                components.percentEncodedPath = "/\(normalizedEndpoint)"
+            } else {
+                components.percentEncodedPath = "\(normalizedBase)/\(normalizedEndpoint)"
+            }
+        }
 
         if let queryItems, !queryItems.isEmpty {
             components.queryItems = (components.queryItems ?? []) + queryItems
@@ -125,8 +162,47 @@ public extension Request {
         try decoder.decode(ReturnType.self, from: data)
     }
 
-    private static var pathSeparators: CharacterSet {
-        CharacterSet(charactersIn: "/")
+    private static func isValidPercentEncodedPath(_ path: String) -> Bool {
+        let scalars = Array(path.unicodeScalars)
+        var index = 0
+
+        while index < scalars.count {
+            let scalar = scalars[index]
+            if scalar == "%" {
+                guard index + 2 < scalars.count,
+                      scalars[index + 1].isASCIIHexDigit,
+                      scalars[index + 2].isASCIIHexDigit else {
+                    return false
+                }
+                index += 3
+            } else {
+                guard CharacterSet.urlPathAllowed.contains(scalar) else {
+                    return false
+                }
+                index += 1
+            }
+        }
+
+        return true
+    }
+
+    private static func droppingTrailingSlashes(from path: String) -> String {
+        var result = path
+        while result.last == "/" {
+            result.removeLast()
+        }
+        return result
+    }
+}
+
+private extension Unicode.Scalar {
+    var isASCIIHexDigit: Bool {
+        switch value {
+        case 48...57, 65...70, 97...102:
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -153,11 +229,26 @@ public protocol PaginatedRequest: Request {
 
     /// The query name used for ``pageSize``. The default is `pageSize`.
     var pageSizeQueryName: String { get }
+
+    /// Decodes a paginated response with the client's configured decoder.
+    func decodePage(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PaginatedResponse<ReturnType>
 }
 
 public extension PaginatedRequest {
     var pageQueryName: String { "page" }
     var pageSizeQueryName: String { "pageSize" }
+
+    func decodePage(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PaginatedResponse<ReturnType> {
+        try decoder.decode(PaginatedResponse<ReturnType>.self, from: data)
+    }
 }
 
 /// A decoded page of response items.

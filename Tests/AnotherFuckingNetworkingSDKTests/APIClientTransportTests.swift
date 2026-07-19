@@ -4,6 +4,21 @@ import Testing
 
 @Suite("APIClient transport")
 struct APIClientTransportTests {
+    @Test("A missing base URL fails before transport")
+    func invalidURL() async throws {
+        let client = APIClient(baseURL: nil)
+
+        do {
+            _ = try await client.send(GetUserRequest(id: 1))
+            Issue.record("Expected invalidURL")
+        } catch let error as NetworkError {
+            guard case .invalidURL = error else {
+                Issue.record("Expected invalidURL, got \(error)")
+                return
+            }
+        }
+    }
+
     @Test("Successful JSON uses the configured decoder")
     func configuredDecoding() async throws {
         let body = Data(#"{"id":42,"display_name":"Arthur"}"#.utf8)
@@ -21,6 +36,35 @@ struct APIClientTransportTests {
         #expect(user == TestUser(id: 42, displayName: "Arthur"))
     }
 
+    @Test("Invalid JSON remains a decoding error")
+    func decodingFailure() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("not-json".utf8)))
+        }
+
+        do {
+            _ = try await stub.client().send(GetUserRequest(id: 1))
+            Issue.record("Expected a decoding error")
+        } catch let error as NetworkError {
+            guard case .decodingFailed(let underlying) = error else {
+                Issue.record("Expected decodingFailed, got \(error)")
+                return
+            }
+            #expect(underlying is DecodingError)
+        }
+    }
+
+    @Test("A request may customize successful response decoding")
+    func customDecoding() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("42".utf8)))
+        }
+
+        let result = try await stub.client().send(CustomDecodingRequest())
+
+        #expect(result == TestUser(id: 42, displayName: "Custom"))
+    }
+
     @Test("Request-specific headers override defaults case-insensitively")
     func caseInsensitiveHeaderOverride() async throws {
         let capturedAuthorization = LockedBox<String?>(nil)
@@ -33,12 +77,37 @@ struct APIClientTransportTests {
         }
         let client = stub.client(globalHeaders: [
             "authorization": "Bearer global",
+            "Authorization": "Bearer duplicate",
             "Accept": "application/json"
         ])
 
         _ = try await client.send(HeaderRequest())
 
         #expect(capturedAuthorization.withLock { $0 } == "Bearer request")
+    }
+
+    @Test("Case-variant duplicates are collapsed deterministically")
+    func duplicateHeaderNormalization() async throws {
+        let captured = LockedBox<[String?]>([])
+        let body = Data(#"{"id":1,"displayName":"Ford"}"#.utf8)
+        let stub = StubSession { request in
+            captured.withLock {
+                $0.append(request.value(forHTTPHeaderField: "X-Duplicate"))
+            }
+            return .respond(try .http(for: request, data: body))
+        }
+        let client = stub.client(globalHeaders: [
+            "X-Duplicate": "uppercase default",
+            "x-duplicate": "lowercase default"
+        ])
+
+        _ = try await client.send(GetUserRequest(id: 1))
+        _ = try await client.send(DuplicateHeaderRequest())
+
+        #expect(captured.withLock { $0 } == [
+            "lowercase default",
+            "lowercase override"
+        ])
     }
 
     @Test("Request bodies use a fresh configured encoder")
@@ -81,6 +150,52 @@ struct APIClientTransportTests {
         }
     }
 
+    @Test("Cancellation thrown during body encoding is preserved")
+    func encodingCancellation() async throws {
+        let client = APIClient(baseURL: URL(string: "https://example.com"))
+
+        do {
+            _ = try await client.send(CancellingEncodingRequest())
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
+    @Test("A pre-cancelled task never attempts body encoding")
+    func cancellationBeforeEncoding() async throws {
+        let gate = AsyncSignal()
+        let client = APIClient(baseURL: URL(string: "https://example.com"))
+        let task = Task {
+            await gate.wait()
+            return try await client.send(FailingEncodingRequest())
+        }
+
+        task.cancel()
+        await gate.signal()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
+    @Test("Cancellation thrown during custom decoding is preserved")
+    func decodingCancellation() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("{}".utf8)))
+        }
+
+        do {
+            _ = try await stub.client().send(CancellingDecodeRequest())
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
     @Test("EmptyResponse accepts 204 responses")
     func emptyResponse() async throws {
         let stub = StubSession { request in
@@ -90,6 +205,24 @@ struct APIClientTransportTests {
         let response = try await stub.client().send(EmptyRequest(path: "users/1"))
 
         #expect(response == EmptyResponse())
+    }
+
+    @Test("EmptyResponse accepts 205 and zero-byte 200 responses", arguments: [205, 200])
+    func otherEmptyResponses(statusCode: Int) async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, statusCode: statusCode))
+        }
+
+        #expect(try await stub.client().send(EmptyRequest(path: "empty")) == EmptyResponse())
+    }
+
+    @Test("EmptyResponse can decode a nonempty successful JSON body")
+    func nonemptyEmptyResponse() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("{}".utf8)))
+        }
+
+        #expect(try await stub.client().send(EmptyRequest(path: "empty")) == EmptyResponse())
     }
 
     @Test("An empty body for a model throws emptyResponse")
@@ -130,6 +263,47 @@ struct APIClientTransportTests {
         }
     }
 
+    @Test("The complete non-2xx boundary is rejected", arguments: [199, 300, 500])
+    func statusBoundaries(statusCode: Int) async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, statusCode: statusCode))
+        }
+
+        do {
+            _ = try await stub.client().send(GetUserRequest(id: 1))
+            Issue.record("Expected HTTP \(statusCode) to fail")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let actual, _) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(actual == statusCode)
+        }
+    }
+
+    @Test("Non-HTTP URL responses remain distinct")
+    func invalidResponse() async throws {
+        let stub = StubSession { request in
+            let response = URLResponse(
+                url: try #require(request.url),
+                mimeType: nil,
+                expectedContentLength: 0,
+                textEncodingName: nil
+            )
+            return .respond(.init(response: response, data: Data()))
+        }
+
+        do {
+            _ = try await stub.client().send(GetUserRequest(id: 1))
+            Issue.record("Expected invalidResponse")
+        } catch let error as NetworkError {
+            guard case .invalidResponse = error else {
+                Issue.record("Expected invalidResponse, got \(error)")
+                return
+            }
+        }
+    }
+
     @Test("URL errors remain typed transport errors")
     func transportFailure() async throws {
         let stub = StubSession { _ in .fail(URLError(.timedOut)) }
@@ -143,6 +317,39 @@ struct APIClientTransportTests {
                 return
             }
             #expect(urlError.code == .timedOut)
+        }
+    }
+
+    @Test("An unrelated URL cancellation remains a typed transport error")
+    func transportCancellationWithoutTaskCancellation() async throws {
+        let stub = StubSession { _ in .fail(URLError(.cancelled)) }
+
+        do {
+            _ = try await stub.client().send(GetUserRequest(id: 1))
+            Issue.record("Expected a transport error")
+        } catch let error as NetworkError {
+            guard case .transport(let urlError) = error else {
+                Issue.record("Expected transport, got \(error)")
+                return
+            }
+            #expect(urlError.code == .cancelled)
+        }
+    }
+
+    @Test("Unexpected transport failures remain inspectable")
+    func unknownTransportFailure() async throws {
+        let stub = StubSession { _ in .fail(UnexpectedTransportError.fixture) }
+
+        do {
+            _ = try await stub.client().send(GetUserRequest(id: 1))
+            Issue.record("Expected an unknown transport error")
+        } catch let error as NetworkError {
+            guard case .unknown(let underlying) = error else {
+                Issue.record("Expected unknown, got \(error)")
+                return
+            }
+            let bridgedError = underlying as NSError
+            #expect(bridgedError.domain.contains("UnexpectedTransportError"))
         }
     }
 
@@ -172,12 +379,64 @@ struct APIClientTransportTests {
         }
         await stopped.wait()
     }
+
+    @Test("Atomic configuration updates never produce mixed snapshots")
+    func atomicConfigurationSnapshots() async throws {
+        let invalidSnapshot = LockedBox(false)
+        let stub = StubSession { request in
+            let version = request.value(forHTTPHeaderField: "X-Version")
+            let path = request.url?.path
+            let isValid = (version == "1" && path == "/v1/check")
+                || (version == "2" && path == "/v2/check")
+            if !isValid {
+                invalidSnapshot.withLock { $0 = true }
+            }
+            return .respond(try .http(for: request, statusCode: 204))
+        }
+        let versionOneURL = stub.baseURL.appendingPathComponent("v1")
+        let versionTwoURL = stub.baseURL.appendingPathComponent("v2")
+        let client = stub.client(
+            baseURL: versionOneURL,
+            globalHeaders: ["X-Version": "1"]
+        )
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<200 {
+                group.addTask {
+                    client.updateConfiguration { configuration in
+                        if index.isMultiple(of: 2) {
+                            configuration.baseURL = versionOneURL
+                            configuration.globalHeaders = ["X-Version": "1"]
+                        } else {
+                            configuration.baseURL = versionTwoURL
+                            configuration.globalHeaders = ["X-Version": "2"]
+                        }
+                    }
+                }
+                group.addTask {
+                    _ = try await client.send(EmptyRequest(path: "check"))
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        #expect(!invalidSnapshot.withLock { $0 })
+    }
 }
 
 private struct HeaderRequest: Request {
     typealias ReturnType = TestUser
     let path = "users/1"
     let headers: [String: String]? = ["Authorization": "Bearer request"]
+}
+
+private struct DuplicateHeaderRequest: Request {
+    typealias ReturnType = TestUser
+    let path = "users/1"
+    let headers: [String: String]? = [
+        "X-Duplicate": "uppercase override",
+        "x-duplicate": "lowercase override"
+    ]
 }
 
 private struct CreateUserRequest: Request {
@@ -200,11 +459,51 @@ private enum EncodingFixtureError: Error {
     case expected
 }
 
+private enum UnexpectedTransportError: Error {
+    case fixture
+}
+
 private struct FailingEncodingRequest: Request {
     typealias ReturnType = EmptyResponse
     let path = "failure"
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         throw EncodingFixtureError.expected
+    }
+}
+
+private struct CancellingEncodingRequest: Request {
+    typealias ReturnType = EmptyResponse
+    let path = "cancel-encoding"
+
+    func makeBody(using encoder: JSONEncoder) throws -> Data? {
+        throw CancellationError()
+    }
+}
+
+private struct CancellingDecodeRequest: Request {
+    typealias ReturnType = EmptyResponse
+    let path = "cancel-decoding"
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> EmptyResponse {
+        throw CancellationError()
+    }
+}
+
+private struct CustomDecodingRequest: Request {
+    typealias ReturnType = TestUser
+    let path = "custom"
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> TestUser {
+        let id = try #require(Int(String(decoding: data, as: UTF8.self)))
+        return TestUser(id: id, displayName: "Custom")
     }
 }

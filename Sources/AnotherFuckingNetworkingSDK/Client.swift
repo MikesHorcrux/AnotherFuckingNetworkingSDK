@@ -93,6 +93,7 @@ public final class APIClient: APIClientProtocol, Sendable {
 
     /// Sends a request and decodes its declared response type.
     public func send<R: Request>(_ request: R) async throws -> R.ReturnType {
+        try Task.checkCancellation()
         let configuration = state.withLock { $0 }
 
         guard let baseURL = configuration.baseURL,
@@ -113,6 +114,8 @@ public final class APIClient: APIClientProtocol, Sendable {
 
         do {
             urlRequest.httpBody = try request.makeBody(using: configuration.encoderFactory())
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw NetworkError.encodingFailed(error)
         }
@@ -166,6 +169,8 @@ public final class APIClient: APIClientProtocol, Sendable {
                 response: httpResponse,
                 using: configuration.decoderFactory()
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw NetworkError.decodingFailed(error)
         }
@@ -183,18 +188,23 @@ public final class APIClient: APIClientProtocol, Sendable {
         defaults: [String: String],
         overrides: [String: String]
     ) -> [String: String] {
-        var result = defaults
-
-        for (overrideName, value) in overrides {
-            if let existingName = result.keys.first(where: {
-                $0.caseInsensitiveCompare(overrideName) == .orderedSame
-            }) {
-                result.removeValue(forKey: existingName)
-            }
-            result[overrideName] = value
+        var result = normalizedHeaders(defaults)
+        for (name, value) in normalizedHeaders(overrides) {
+            result[name] = value
         }
-
         return result
+    }
+
+    /// Collapses invalid case-variant duplicates predictably. The
+    /// lexicographically last spelling wins before names are lowercased.
+    private static func normalizedHeaders(
+        _ headers: [String: String]
+    ) -> [String: String] {
+        var normalized: [String: String] = [:]
+        for name in headers.keys.sorted() {
+            normalized[name.lowercased()] = headers[name]
+        }
+        return normalized
     }
 }
 
@@ -210,6 +220,7 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
     }
 
     var path: String { wrapped.path }
+    var pathEncoding: RequestPathEncoding { wrapped.pathEncoding }
     var method: HTTPMethod { wrapped.method }
     var headers: [String: String]? { wrapped.headers }
     var body: Data? { wrapped.body }
@@ -245,6 +256,14 @@ private struct PaginatedRequestWrapper<Inner: PaginatedRequest>: Request {
 
     func makeBody(using encoder: JSONEncoder) throws -> Data? {
         try wrapped.makeBody(using: encoder)
+    }
+
+    func decode(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PaginatedResponse<Inner.ReturnType> {
+        try wrapped.decodePage(data, response: response, using: decoder)
     }
 }
 

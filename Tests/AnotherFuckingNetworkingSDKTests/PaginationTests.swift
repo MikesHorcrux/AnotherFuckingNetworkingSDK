@@ -79,6 +79,51 @@ struct PaginationTests {
             URLQueryItem(name: "limit", value: "50")
         ])
     }
+
+    @Test("A paginated request may customize response decoding")
+    func customPageDecoding() async throws {
+        let body = Data(#"{"results":[{"id":9,"displayName":"Custom"}],"page":3,"pages":7}"#.utf8)
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: body))
+        }
+
+        let response = try await stub.client().sendPage(CustomPageDecodingRequest())
+
+        #expect(response == PaginatedResponse(
+            items: [TestUser(id: 9, displayName: "Custom")],
+            currentPage: 3,
+            totalPages: 7
+        ))
+    }
+
+    @Test("Cancellation from custom page decoding is preserved")
+    func customPageDecodingCancellation() async throws {
+        let stub = StubSession { request in
+            .respond(try .http(for: request, data: Data("{}".utf8)))
+        }
+
+        do {
+            _ = try await stub.client().sendPage(CancellingPageDecodingRequest())
+            Issue.record("Expected cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+    }
+
+    @Test("Pagination preserves explicitly percent-encoded paths")
+    func percentEncodedPath() async throws {
+        let capturedURL = LockedBox<URL?>(nil)
+        let body = Data(#"{"items":[],"currentPage":1,"totalPages":1}"#.utf8)
+        let stub = StubSession { request in
+            capturedURL.withLock { $0 = request.url }
+            return .respond(try .http(for: request, data: body))
+        }
+
+        _ = try await stub.client().sendPage(PercentEncodedPageRequest())
+
+        #expect(capturedURL.withLock { $0 }?.absoluteString.contains("/folders%2F42?") == true)
+        #expect(capturedURL.withLock { $0 }?.absoluteString.contains("%252F") == false)
+    }
 }
 
 private struct UserPageRequest: PaginatedRequest {
@@ -123,6 +168,58 @@ private struct CustomKeyPageRequest: PaginatedRequest {
     let pageQueryName = "offset"
     let pageSizeQueryName = "limit"
     let path = "users"
+}
+
+private struct CustomPageDecodingRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    private struct Envelope: Decodable {
+        let results: [TestUser]
+        let page: Int
+        let pages: Int
+    }
+
+    let page = 3
+    let pageSize = 20
+    let path = "custom-page"
+
+    func decodePage(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PaginatedResponse<TestUser> {
+        let envelope = try decoder.decode(Envelope.self, from: data)
+        return PaginatedResponse(
+            items: envelope.results,
+            currentPage: envelope.page,
+            totalPages: envelope.pages
+        )
+    }
+}
+
+private struct CancellingPageDecodingRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    let page = 1
+    let pageSize = 20
+    let path = "cancel-page"
+
+    func decodePage(
+        _ data: Data,
+        response: HTTPURLResponse,
+        using decoder: JSONDecoder
+    ) throws -> PaginatedResponse<TestUser> {
+        throw CancellationError()
+    }
+}
+
+private struct PercentEncodedPageRequest: PaginatedRequest {
+    typealias ReturnType = TestUser
+
+    let page = 1
+    let pageSize = 20
+    let path = "folders%2F42"
+    let pathEncoding = RequestPathEncoding.percentEncoded
 }
 
 /// Calls the protocol's default URL builder from a custom implementation.
