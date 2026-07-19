@@ -10,6 +10,8 @@ roadmap item is not a shipped feature.
 - Typed requests, metadata, raw payloads, status policies, pagination, and
   replay-safe opt-in HTTP retries.
 - Single-pass HTTP byte streams with bounded failures and lifecycle activity.
+- Bounded Server-Sent Events parsing over HTTP byte streams with UTF-8,
+  CRLF/LF, multiline data, retry metadata, and cancellation-safe iteration.
 - Authenticated wrapper with single-flight token loading and safe 401 replay.
 - Memory/file uploads, durable foreground downloads, multipart validation.
 - Opt-in upload/download progress events with bounded byte counts and phases.
