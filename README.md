@@ -479,10 +479,13 @@ let response = try await client.upload(
 
 The SDK writes the multipart envelope to a temporary file using bounded
 64 KiB chunks, uploads that file, reuses it for replay-safe retries, and removes
-it on every terminal path. Text values are UTF-8 and their line endings are
-normalized to CRLF. Field names and filenames must be nonempty printable
-US-ASCII, explicit content types must be bare `type/subtype` values, and file
-parts are scanned for boundary collisions across chunk boundaries.
+it on every terminal path. When the length is known, the SDK sets
+`Content-Length` before `customize(_:)` so file-backed signers can include it
+without loading the body; an explicit caller header is preserved. Text values
+are UTF-8 and their line endings are normalized to CRLF. Field names and
+filenames must be nonempty printable US-ASCII, explicit content types must be
+bare `type/subtype` values, and file parts are scanned for boundary collisions
+across chunk boundaries.
 
 The default initializer generates a boundary. The throwing `init(boundary:)` is intended for protocols or deterministic tests that require an explicit value: boundaries must contain 1–70 allowed MIME boundary characters and cannot end in a space. `encode()` rejects an empty form or a part containing `--<boundary>` instead of emitting ambiguous framing.
 

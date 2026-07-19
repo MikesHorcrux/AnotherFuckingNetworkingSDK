@@ -850,7 +850,11 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         case .multipart(let form):
             let fileURL = try await prepareMultipartUpload(form)
             multipartFileURL = fileURL
-            totalBytes = form.estimatedByteCount
+            let writtenLength = try? await fileIOExecutor.run {
+                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
+                return values.fileSize.map(Int64.init)
+            }
+            totalBytes = writtenLength ?? form.estimatedByteCount
             bodySource = .provided(nil)
         }
 
@@ -859,7 +863,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             urlRequest = try Self.makeURLRequest(
                 request,
                 configuration: configuration,
-                bodySource: bodySource
+                bodySource: bodySource,
+                contentLength: totalBytes
             )
         } catch {
             if let multipartFileURL {
@@ -1348,7 +1353,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
     private static func makeURLRequest<R: HTTPRequest>(
         _ request: R,
         configuration: Configuration,
-        bodySource: RequestBodySource = .encoded
+        bodySource: RequestBodySource = .encoded,
+        contentLength: Int64? = nil
     ) throws -> URLRequest {
         guard let baseURL = configuration.baseURL,
               let url = request.makeURL(baseURL: baseURL) else {
@@ -1381,6 +1387,15 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             try Task.checkCancellation()
         case .provided(let data):
             urlRequest.httpBody = data
+        }
+
+        if let contentLength,
+           contentLength >= 0,
+           urlRequest.value(forHTTPHeaderField: "Content-Length") == nil {
+            urlRequest.setValue(
+                String(contentLength),
+                forHTTPHeaderField: "Content-Length"
+            )
         }
 
         do {

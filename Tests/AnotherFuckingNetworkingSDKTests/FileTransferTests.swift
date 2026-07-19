@@ -57,6 +57,46 @@ struct FileTransferTests {
         #expect(value == TestUser(id: 8, displayName: "File"))
     }
 
+    @Test("File and multipart uploads expose known lengths to customization")
+    func fileBackedContentLengthCustomization() async throws {
+        let sourceURL = uniqueTemporaryURL()
+        let filePayload = Data("file-size".utf8)
+        try filePayload.write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        var form = try StreamingMultipartFormData(boundary: "AFN-LENGTH")
+        try form.append("multipart-size", name: "value")
+
+        let observations = LockedBox<[(String?, Data?)]>([])
+        let stub = StubSession { request in
+            observations.withLock { values in
+                values.append((
+                    request.value(forHTTPHeaderField: "X-Upload-Length"),
+                    requestBodyData(request)
+                ))
+            }
+            return .respond(try .http(
+                for: request,
+                data: Data(#"{"id":10,"displayName":"Length"}"#.utf8)
+            ))
+        }
+
+        _ = try await stub.client().upload(
+            LengthAwareUploadRequest(),
+            from: .file(sourceURL)
+        )
+        _ = try await stub.client().upload(
+            LengthAwareUploadRequest(contentType: form.contentType),
+            from: .multipart(form)
+        )
+
+        let values = observations.withLock { $0 }
+        #expect(values.count == 2)
+        for (header, body) in values {
+            #expect(header == String(body?.count ?? -1))
+        }
+    }
+
     @Test("A non-file upload source fails before transport")
     func invalidUploadSource() async throws {
         let transportCalls = LockedBox(0)
@@ -785,6 +825,30 @@ private struct FileUploadFixtureRequest: Request {
 
     let path = "uploads/file"
     let method = HTTPMethod.put
+}
+
+private struct LengthAwareUploadRequest: Request {
+    typealias ReturnType = TestUser
+
+    let contentType: String?
+
+    init(contentType: String? = nil) {
+        self.contentType = contentType
+    }
+
+    let path = "uploads/length"
+    let method = HTTPMethod.post
+
+    var headers: [String: String]? {
+        contentType.map { ["Content-Type": $0] }
+    }
+
+    func customize(_ urlRequest: inout URLRequest) throws {
+        urlRequest.setValue(
+            urlRequest.value(forHTTPHeaderField: "Content-Length") ?? "missing",
+            forHTTPHeaderField: "X-Upload-Length"
+        )
+    }
 }
 
 private struct StatusUploadFixtureRequest: Request {
