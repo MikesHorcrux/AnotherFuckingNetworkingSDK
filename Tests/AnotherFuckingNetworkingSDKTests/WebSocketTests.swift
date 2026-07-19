@@ -920,8 +920,10 @@ struct URLSessionWebSocketTransportTests {
         #expect(adapter.snapshot.receiveCount == 1)
 
         let receiveTask = Task { try await transport.receive() }
-        await Task.yield()
-        await Task.yield()
+        for _ in 0..<1_000 where !transport.hasPendingReceiveForTesting {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(transport.hasPendingReceiveForTesting)
         adapter.completeReceive(.success(.text("direct")))
 
         #expect(try await receiveTask.value == .text("direct"))
