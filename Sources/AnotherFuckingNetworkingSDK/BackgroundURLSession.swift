@@ -335,10 +335,15 @@ public final class BackgroundURLSessionAdapter: Sendable {
     }
 
     /// Starts a new download or resumes Foundation resume data.
+    ///
+    /// Set `startImmediately` to `false` when the caller must bind the
+    /// returned task identifier to durable state before delegate callbacks can
+    /// be processed. The caller must later invoke ``resume(taskIdentifier:)``.
     public func download(
         _ request: URLRequest,
         resumeData: Data? = nil,
-        jobID: UUID? = nil
+        jobID: UUID? = nil,
+        startImmediately: Bool = true
     ) -> URLSessionDownloadTask {
         let task: URLSessionDownloadTask
         if let resumeData {
@@ -347,18 +352,23 @@ public final class BackgroundURLSessionAdapter: Sendable {
             task = session.downloadTask(with: request)
         }
         configure(task, jobID: jobID)
-        task.resume()
+        if startImmediately {
+            task.resume()
+        }
         return task
     }
 
     /// Validates optional resume data before creating a Foundation download
     /// task. Use `.propertyList` only when the application wants strict
     /// integrity checking for the current Foundation representation.
+    /// `startImmediately` provides the same bind-before-callback guarantee as
+    /// ``download(_:resumeData:jobID:startImmediately:)``.
     public func downloadValidated(
         _ request: URLRequest,
         resumeData: Data? = nil,
         jobID: UUID? = nil,
-        mode: BackgroundTransferResumeDataValidationMode = .bounded
+        mode: BackgroundTransferResumeDataValidationMode = .bounded,
+        startImmediately: Bool = true
     ) throws -> URLSessionDownloadTask {
         let validated = try BackgroundTransferResumeDataValidator().validate(
             resumeData,
@@ -367,7 +377,8 @@ public final class BackgroundURLSessionAdapter: Sendable {
         return download(
             request,
             resumeData: validated,
-            jobID: jobID
+            jobID: jobID,
+            startImmediately: startImmediately
         )
     }
 

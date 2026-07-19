@@ -8,7 +8,7 @@ run.
 ## Run
 
 - Date: 2026-07-18
-- SDK head: `b148b9f` (`Mike/stream-task-metrics`)
+- SDK head: `b097337` (`Mike/host-app-harness`)
 - Toolchain: Xcode 26.2 / Swift 6 language mode
 - Physical target: paired iPad Air 13-inch (M3), currently locked
 - Simulator target: not rerun in this evidence refresh
@@ -18,7 +18,8 @@ run.
 | Check | Command/result | Evidence level |
 | --- | --- | --- |
 | Strict host suite | `swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors` — 357 tests in 42 suites passed in Debug and Release | Strong unit/integration evidence |
-| iOS simulator suite | Prior simulator evidence remains recorded below; no new simulator run was needed for this documentation-only refresh | Existing simulator evidence |
+| Signed-host fixture compile | `xcodebuild ... BackgroundTransferHost ... generic/platform=iOS CODE_SIGNING_ALLOWED=NO` — exit 0 in Release with strict concurrency | Strong compile evidence; no runtime claim |
+| iOS simulator suite | Prior simulator evidence remains recorded below; this change was validated as a generic device product build, not a simulator runtime | Existing simulator evidence |
 | Physical product build | No new device product build; the paired iPad was locked and its developer tunnel was unavailable | Missing device-build evidence for this refresh |
 | Physical package tests | Not executable: SwiftPM test targets have no host application, and Xcode reports tool-hosted testing is unavailable on device destinations | Missing runtime evidence |
 | OS termination/background relaunch | Not executed; requires a signed host app, background session identifier, durable storage, and app lifecycle callbacks | Missing lifecycle evidence |
