@@ -92,8 +92,8 @@ final class HostModel {
                 let task = try adapter.downloadValidated(
                     request,
                     jobID: id,
-                    startImmediately: false,
-                    mode: .bounded
+                    mode: .bounded,
+                    startImmediately: false
                 )
                 do {
                     try await router.bind(BackgroundTransferRoute(
