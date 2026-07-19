@@ -43,9 +43,10 @@ source and tests before relying on any example below.
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
   `DownloadDestination`, durable file ownership.
-- Background transfer state: `TransferJob`, `TransferJobStore`, and
-  `TransferJobCoordinator`; keep URLSession background delegates and request
-  resolution in the application-owned adapter.
+- Background transfer state: `TransferJob`, `TransferJobStore`,
+  `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
+  resolution, authentication, destination commits, and relaunch routing in
+  the application layer.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
@@ -97,8 +98,10 @@ adapter rather than the transport core. See
 Use `.data` only for bounded in-memory uploads; use `.file` for large uploads.
 Downloads must validate destinations before transport and move the temporary
 Foundation file into caller-visible storage exactly once. Background sessions,
-resume data, and relaunch recovery belong in a lifecycle-bound module; do not
-pretend a foreground convenience task is durable.
+resume data, and relaunch recovery belong in a lifecycle-bound module. Use
+`BackgroundURLSessionAdapter` for Foundation delegate events and keep
+`TransferJobCoordinator` as the single durable state writer; do not pretend a
+foreground convenience task is durable.
 
 ### WebSockets and Observation
 

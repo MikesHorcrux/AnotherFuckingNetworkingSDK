@@ -15,6 +15,8 @@ roadmap item is not a shipped feature.
 - Opt-in upload/download progress events with bounded byte counts and phases.
 - Durable `TransferJob` records, JSON persistence, and cancellation-safe
   orchestration seams for app-owned background sessions.
+- `BackgroundURLSessionAdapter` for Foundation background delegate events,
+  progress, resume-data extraction, and relaunch completion callbacks.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
@@ -24,9 +26,9 @@ roadmap item is not a shipped feature.
 
 ## Next production modules
 
-1. **Platform background/resumable adapters** — background URLSession delegate
-   rebinding, system completion handlers, resume-data validation, and relaunch
-   integration on each supported Apple platform.
+1. **Platform background/resumable integration** — device/relaunch coverage,
+   resume-data validation, and coordinator routing for the shipped
+   `BackgroundURLSessionAdapter` on each supported Apple platform.
 2. **Platform task-metrics integration** — wire the shipped
    `NetworkTaskMetricsSnapshot(URLSessionTaskMetrics)` adapter into each
    delegate-backed operation where the platform exposes metrics.

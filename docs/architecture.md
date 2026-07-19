@@ -28,8 +28,8 @@ turning `APIClient` into a global coordinator.
 flowchart LR
     Core["Core product\nAPIClient / policies / streams"]
     Test["Testing product\nMockAPIClient / fixtures"]
-    Background["Planned background product\nresume + relaunch lifecycle"]
-    Telemetry["Planned telemetry product\nmetrics / OpenTelemetry bridge"]
+    Background["BackgroundURLSessionAdapter\ndelegate + resume events"]
+    Telemetry["Telemetry policy\nmetrics / exporter bridge"]
     Network["Planned network product\nNWPathMonitor helpers"]
     Test --> Core
     Background --> Core
@@ -77,6 +77,8 @@ Policies are values or wrappers, not hidden global switches:
 - `NetworkActivityMonitor` and `NetworkingLogger` are opt-in observers.
 - `NetworkTelemetry` emits privacy-safe operation and attempt events without
   coupling the core to a metrics vendor.
+- `BackgroundURLSessionAdapter` translates platform delegate callbacks while
+  `TransferJobCoordinator` remains the durable state owner.
 - WebSocket buffering and lifecycle policies are captured at connection open.
 
 This keeps the default client fast and avoids forcing cache, telemetry,
@@ -98,6 +100,8 @@ The ordinary client path avoids actor hops and observer work unless an adapter
 is injected. Response streams are single-pass and do not accumulate bodies.
 Multipart is currently memory-backed; use file uploads for large raw bodies and
 track the streaming multipart module separately on the [roadmap](roadmap.md).
+Background URLSession work is delegate-backed and remains separate from the
+foreground `APIClient` request path.
 
 Do not implement a custom HTTP/2, HTTP/3, TLS, cookie, or redirect stack.
 Foundation already owns those protocol concerns and can evolve them with the

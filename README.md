@@ -515,10 +515,12 @@ try await coordinator.enqueue(
 )
 ```
 
-The operation closure resolves `requestKey` and bridges to an app-owned
-background URLSession adapter. It can persist bounded resume data at each
-checkpoint. System background delegate rebinding and completion handlers remain
-platform-specific; see [Background and resumable transfers](docs/background-transfers.md).
+The operation closure resolves `requestKey` and bridges to
+`BackgroundURLSessionAdapter` (or another app-owned adapter). It can persist
+bounded resume data at each checkpoint. The adapter translates Foundation
+delegate callbacks and invokes the app's completion handler only after
+`backgroundEventsFinished`; request resolution, auth, and destination commits
+remain application policy. See [Background and resumable transfers](docs/background-transfers.md).
 
 ## WebSockets
 
