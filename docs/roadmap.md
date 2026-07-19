@@ -17,6 +17,7 @@ roadmap item is not a shipped feature.
   orchestration seams for app-owned background sessions.
 - `BackgroundURLSessionAdapter` for Foundation background delegate events,
   progress, resume-data extraction, and relaunch completion callbacks.
+- `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Bounded WebSocket receive pump, lifecycle state, Observation adapters, and
   loopback fixtures.
@@ -32,7 +33,8 @@ roadmap item is not a shipped feature.
 2. **Platform task-metrics integration** — wire the shipped
    `NetworkTaskMetricsSnapshot(URLSessionTaskMetrics)` adapter into each
    delegate-backed operation where the platform exposes metrics.
-3. **Streaming multipart** — file-backed parts and bounded encoding.
+3. **Streaming multipart integration** — broader upload retry, signing, and
+   oldest-target coverage for the shipped file-backed encoder.
 4. **WebSocket platform hardening** — server-specific cursor/session recovery
    adapters and oldest-target integration coverage.
 5. **Conditional caching** — validator-aware `If-None-Match`/`304` adapters.

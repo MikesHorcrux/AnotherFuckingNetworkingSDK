@@ -446,7 +446,30 @@ let response = try await client.upload(
 )
 ```
 
-`MultipartFormData` is deliberately memory-backed: every part and the final encoded body must fit in memory. Use the file-backed upload API for a large raw file; multipart streaming and background multipart uploads are separate lifecycle concerns. Text values are UTF-8 and their line endings are normalized to CRLF. Field names and filenames must be nonempty printable US-ASCII, and explicit content types must be bare `type/subtype` values without parameters.
+`MultipartFormData` is deliberately memory-backed: every part and the final encoded body must fit in memory. For large forms, use `StreamingMultipartFormData` and the multipart upload body:
+
+```swift
+var form = try StreamingMultipartFormData(boundary: "AFN-STREAM-42")
+try form.append("Arthur Dent", name: "displayName")
+try form.append(
+    imageFileURL,
+    name: "avatar",
+    filename: "avatar.jpg",
+    contentType: "image/jpeg"
+)
+
+let response = try await client.upload(
+    UploadProfileRequest(userID: 42, contentType: form.contentType),
+    from: .multipart(form)
+)
+```
+
+The SDK writes the multipart envelope to a temporary file using bounded
+64 KiB chunks, uploads that file, reuses it for replay-safe retries, and removes
+it on every terminal path. Text values are UTF-8 and their line endings are
+normalized to CRLF. Field names and filenames must be nonempty printable
+US-ASCII, explicit content types must be bare `type/subtype` values, and file
+parts are scanned for boundary collisions across chunk boundaries.
 
 The default initializer generates a boundary. The throwing `init(boundary:)` is intended for protocols or deterministic tests that require an explicit value: boundaries must contain 1–70 allowed MIME boundary characters and cannot end in a space. `encode()` rejects an empty form or a part containing `--<boundary>` instead of emitting ambiguous framing.
 

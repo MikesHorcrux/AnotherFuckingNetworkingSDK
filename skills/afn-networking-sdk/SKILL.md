@@ -42,7 +42,7 @@ source and tests before relying on any example below.
 - Auth: `HTTPAuthenticator`, `SingleFlightTokenProvider`,
   `AuthenticatedAPIClient`; 401 replay is idempotency-aware.
 - Transfers: `APIClientTransferProtocol`, `UploadBody`,
-  `DownloadDestination`, durable file ownership.
+  `StreamingMultipartFormData`, `DownloadDestination`, durable file ownership.
 - Background transfer state: `TransferJob`, `TransferJobStore`,
   `TransferJobCoordinator`, and `BackgroundURLSessionAdapter`; keep request
   resolution, authentication, destination commits, and relaunch routing in
@@ -95,7 +95,9 @@ adapter rather than the transport core. See
 
 ### Transfers and files
 
-Use `.data` only for bounded in-memory uploads; use `.file` for large uploads.
+Use `.data` only for bounded in-memory uploads; use `.file` for large raw
+uploads and `.multipart(StreamingMultipartFormData)` for large mixed forms.
+The multipart writer uses bounded chunks and a temporary owned upload file.
 Downloads must validate destinations before transport and move the temporary
 Foundation file into caller-visible storage exactly once. Background sessions,
 resume data, and relaunch recovery belong in a lifecycle-bound module. Use
