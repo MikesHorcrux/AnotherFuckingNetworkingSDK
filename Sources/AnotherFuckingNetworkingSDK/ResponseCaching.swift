@@ -168,6 +168,7 @@ private struct ConditionalValidationRequest<Base: Request>: Request {
         base.acceptedStatusCodes.including(304)
     }
     var retryPolicy: HTTPRetryPolicy { base.retryPolicy }
+    var maximumResponseBodyBytes: Int? { base.maximumResponseBodyBytes }
     var authenticationReplaySafety: HTTPRetryPolicy.ReplaySafety {
         base.authenticationReplaySafety
     }

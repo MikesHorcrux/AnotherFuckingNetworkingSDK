@@ -7,6 +7,10 @@ see the [documentation hub](docs/README.md). Release history and the 2.0.0 gate
 are tracked in [CHANGELOG.md](CHANGELOG.md). Repository-specific agent
 implementation rules live in [skills/afn-networking-sdk](skills/afn-networking-sdk/SKILL.md).
 
+Response bodies are bounded by a 32 MiB default. Clients and individual
+requests can choose a smaller positive limit, while streaming APIs enforce the
+same policy incrementally and fail with a typed oversize error.
+
 ## Requirements
 
 - Swift 6.0 or newer

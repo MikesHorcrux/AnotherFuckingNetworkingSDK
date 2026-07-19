@@ -40,6 +40,26 @@ client.updateConfiguration { configuration in
 An in-flight operation retains its original base URL, headers, and codec
 factories. A later configuration update does not create a mixed request.
 
+### Bound response memory
+
+Buffered request APIs use a 32 MiB response-body limit by default. Configure a
+different positive limit per client, or set it to `nil` only when an
+application explicitly accepts unbounded buffering:
+
+```swift
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    maximumResponseBodyBytes: 8 * 1_024 * 1_024
+)
+```
+
+An endpoint can override the client policy by implementing
+`maximumResponseBodyBytes` on its `HTTPRequest`. Oversized buffered responses
+throw `NetworkError.responseBodyTooLarge` before decoding. Streaming requests
+apply the same limit as bytes are consumed and throw
+`HTTPByteStreamError.responseBodyTooLarge`; the URLSession task is cancelled
+as soon as the first excess byte is observed.
+
 ### Apply a final request policy
 
 Use `requestCustomizer` for concerns that must see the fully assembled
