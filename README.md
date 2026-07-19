@@ -158,6 +158,12 @@ struct SlowReportRequest: Request {
 
 This is also the right place for request signing that must inspect the final method, URL, headers, and body. A thrown error becomes `NetworkError.requestConfigurationFailed`; cancellation remains `CancellationError`.
 
+For application-wide policy, configure `APIClient.Configuration.requestCustomizer`.
+It runs after each request has its final URL, method, encoded body, and
+content length, so the same hook can add tracing/correlation headers or sign
+ordinary HTTP requests, streams, uploads, and downloads. WebSocket upgrades
+keep their stricter handshake builder.
+
 ## Configurable encoding and decoding
 
 Factories avoid sharing mutable encoder or decoder instances between concurrent requests:

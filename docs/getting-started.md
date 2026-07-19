@@ -40,6 +40,35 @@ client.updateConfiguration { configuration in
 An in-flight operation retains its original base URL, headers, and codec
 factories. A later configuration update does not create a mixed request.
 
+### Apply a final request policy
+
+Use `requestCustomizer` for concerns that must see the fully assembled
+`URLRequest`, including the resolved URL, method, encoded body, and content
+length. The hook runs after the endpoint's own `customize(_:)` implementation
+and applies consistently to ordinary requests, pagination, streams, uploads,
+and downloads:
+
+```swift
+let client = APIClient(
+    baseURL: URL(string: "https://api.example.com")!,
+    requestCustomizer: { request in
+        request.setValue(
+            UUID().uuidString,
+            forHTTPHeaderField: "X-Request-ID"
+        )
+        request.setValue(
+            "AnotherFuckingNetworkingSDK/2",
+            forHTTPHeaderField: "User-Agent"
+        )
+    }
+)
+```
+
+This is also the right seam for signing the final URL and body. If the hook
+throws, no transport is started and the error is reported as
+`NetworkError.requestConfigurationFailed`. Use `updateConfiguration` to
+replace the hook atomically with the rest of a client configuration.
+
 ## Define a typed request
 
 ```swift

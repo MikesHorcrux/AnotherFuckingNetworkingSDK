@@ -18,6 +18,8 @@ integrating host app.
   typed responses, raw payloads, metadata, pagination, status policies,
   cancellation preservation, and opt-in replay-safe retries.
 - Single-pass bounded HTTP byte streams.
+- A global final-request customization hook for correlation IDs, tracing,
+  signing, user-agent policy, and other application-wide HTTP request policy.
 - Bounded Server-Sent Events streams with UTF-8 validation, LF/CRLF framing,
   multiline data, IDs, event names, and retry metadata.
 - Typed JSON Lines/NDJSON streams with bounded records and cancellation-safe
@@ -69,4 +71,3 @@ integrating host app.
    evidence described in the device-validation runbook.
 4. Update this file with the final tag date and migration notes.
 5. Tag the semantic version and publish the generated release notes.
-

@@ -185,6 +185,15 @@ private final class TransferProgressDelegate: NSObject,
 public final class APIClient: APIClientTransferProgressProtocol, APIClientStreamingProtocol, WebSocketClientProtocol, Sendable {
     public typealias EncoderFactory = @Sendable () -> JSONEncoder
     public typealias DecoderFactory = @Sendable () -> JSONDecoder
+    /// Applies process-wide policy to every fully assembled ``URLRequest``.
+    ///
+    /// The hook runs after request-specific customization, body encoding, and
+    /// content-length calculation. It is therefore suitable for correlation
+    /// IDs, tracing headers, user-agent policy, request signing, and other
+    /// concerns that must inspect the final URL, method, headers, or body.
+    /// Throwing prevents the request from being sent and is surfaced as
+    /// ``NetworkError/requestConfigurationFailed``.
+    public typealias RequestCustomizer = @Sendable (inout URLRequest) throws -> Void
 
     /// A process-wide client for applications that prefer shared configuration.
     /// Dependency-injected instances are recommended for services and tests.
@@ -223,17 +232,20 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         public var globalHeaders: [String: String]
         public var encoderFactory: EncoderFactory
         public var decoderFactory: DecoderFactory
+        public var requestCustomizer: RequestCustomizer?
 
         public init(
             baseURL: URL? = nil,
             globalHeaders: [String: String] = [:],
             encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
-            decoderFactory: @escaping DecoderFactory = { JSONDecoder() }
+            decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
+            requestCustomizer: RequestCustomizer? = nil
         ) {
             self.baseURL = baseURL
             self.globalHeaders = globalHeaders
             self.encoderFactory = encoderFactory
             self.decoderFactory = decoderFactory
+            self.requestCustomizer = requestCustomizer
         }
     }
 
@@ -255,6 +267,12 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         set { state.withCriticalRegion { $0.globalHeaders = newValue } }
     }
 
+    /// Applies process-wide policy to every final request.
+    public var requestCustomizer: RequestCustomizer? {
+        get { state.withCriticalRegion { $0.requestCustomizer } }
+        set { state.withCriticalRegion { $0.requestCustomizer = newValue } }
+    }
+
     private let state: CriticalState<Configuration>
     private let urlSession: URLSession
     private let logger: NetworkingLogger?
@@ -274,6 +292,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
+        requestCustomizer: RequestCustomizer? = nil,
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         telemetry: NetworkTelemetry? = nil
@@ -284,6 +303,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             globalHeaders: globalHeaders,
             encoderFactory: encoderFactory,
             decoderFactory: decoderFactory,
+            requestCustomizer: requestCustomizer,
             logger: logger,
             activityMonitor: activityMonitor,
             telemetry: telemetry,
@@ -305,6 +325,7 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
         globalHeaders: [String: String] = [:],
         encoderFactory: @escaping EncoderFactory = { JSONEncoder() },
         decoderFactory: @escaping DecoderFactory = { JSONDecoder() },
+        requestCustomizer: RequestCustomizer? = nil,
         logger: NetworkingLogger? = nil,
         activityMonitor: NetworkActivityMonitor? = nil,
         telemetry: NetworkTelemetry? = nil,
@@ -324,7 +345,8 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                 baseURL: baseURL,
                 globalHeaders: globalHeaders,
                 encoderFactory: encoderFactory,
-                decoderFactory: decoderFactory
+                decoderFactory: decoderFactory,
+                requestCustomizer: requestCustomizer
             )
         )
         self.urlSession = urlSession
@@ -1400,6 +1422,13 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
 
         do {
             try request.customize(&urlRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NetworkError.requestConfigurationFailed(error)
+        }
+        do {
+            try configuration.requestCustomizer?(&urlRequest)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
