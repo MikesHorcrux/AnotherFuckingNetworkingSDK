@@ -87,6 +87,7 @@ struct WebSocketLoopbackTests {
         #expect(await connection.state == .closed(close))
 
         await server.waitForCompletion()
+        await server.waitForClose()
         await delegate.completionSignal.wait()
 
         let serverSnapshot = server.snapshot

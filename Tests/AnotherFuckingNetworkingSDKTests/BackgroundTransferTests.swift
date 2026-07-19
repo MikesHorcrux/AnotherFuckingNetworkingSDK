@@ -108,6 +108,69 @@ struct BackgroundTransferTests {
         #expect(await coordinator.snapshot() == [finished])
     }
 
+    @Test("External background callbacks checkpoint and commit idempotently")
+    func externalLifecycleCallbacks() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let job = TransferJob(kind: .download, requestKey: "background")
+        try await coordinator.enqueue(job)
+
+        let checkpointed = try await coordinator.recordCheckpoint(
+            id: job.id,
+            update: TransferJobUpdate(
+                progress: TransferProgress(
+                    operation: .download,
+                    phase: .running,
+                    bytesCompleted: 4,
+                    totalBytes: 8,
+                    attempt: 2
+                ),
+                resumeData: Data([1, 2])
+            )
+        )
+        #expect(checkpointed.bytesCompleted == 4)
+        #expect(checkpointed.state == .queued)
+
+        let succeeded = try await coordinator.commitSuccess(
+            id: job.id,
+            result: TransferJobResult(bytesCompleted: 8, totalBytes: 8)
+        )
+        let duplicate = try await coordinator.commitSuccess(
+            id: job.id,
+            result: TransferJobResult(bytesCompleted: 99, totalBytes: 99)
+        )
+        #expect(succeeded.state == .succeeded)
+        #expect(duplicate == succeeded)
+    }
+
+    @Test("External failures persist only bounded error identity")
+    func externalFailureIsPrivacySafe() async throws {
+        let store = InMemoryTransferJobStore()
+        let coordinator = TransferJobCoordinator(store: store)
+        let job = TransferJob(kind: .upload, requestKey: "background-upload")
+        try await coordinator.enqueue(job)
+
+        let failed = try await coordinator.recordFailure(
+            id: job.id,
+            failure: TransferJobFailure(
+                domain: "com.example.server",
+                code: 503
+            )
+        )
+        #expect(failed.state == .failed)
+        #expect(failed.lastError == "com.example.server (503)")
+        #expect(try await coordinator.recordCheckpoint(
+            id: job.id,
+            update: TransferJobUpdate(
+                progress: TransferProgress(
+                    operation: .upload,
+                    phase: .running,
+                    bytesCompleted: 10
+                )
+            )
+        ) == failed)
+    }
+
     @Test("Cancellation pauses a job and keeps its last checkpoint")
     func cancellationPersistsPause() async throws {
         let store = InMemoryTransferJobStore()

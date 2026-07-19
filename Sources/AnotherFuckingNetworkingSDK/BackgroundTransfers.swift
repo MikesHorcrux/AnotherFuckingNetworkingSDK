@@ -170,17 +170,41 @@ public struct TransferJob: Codable, Equatable, Sendable {
         _ error: any Error,
         now: Date
     ) {
+        let nsError = error as NSError
+        markFailed(domain: nsError.domain, code: nsError.code, now: now)
+    }
+
+    fileprivate mutating func markFailed(
+        domain: String,
+        code: Int,
+        now: Date
+    ) {
         state = .failed
         // Durable job state can outlive the process and may be inspected or
         // synced by application code. Persist only a bounded NSError identity
         // instead of arbitrary localized/reflected error text, which can
         // contain response bodies, file paths, credentials, or user data.
-        let nsError = error as NSError
-        let domain = String(nsError.domain.prefix(128))
+        let domain = String(domain.prefix(128))
         lastError = boundedTransferErrorSummary(
-            domain + " (" + String(nsError.code) + ")"
+            domain + " (" + String(code) + ")"
         )
         updatedAt = now
+    }
+}
+
+/// A privacy-safe, Sendable failure identity for externally-driven transfers.
+public struct TransferJobFailure: Equatable, Sendable {
+    public let domain: String
+    public let code: Int
+
+    public init(domain: String, code: Int) {
+        self.domain = String(domain.prefix(128))
+        self.code = code
+    }
+
+    public init(error: any Error) {
+        let nsError = error as NSError
+        self.init(domain: nsError.domain, code: nsError.code)
     }
 }
 
@@ -379,6 +403,78 @@ public actor TransferJobCoordinator {
         try await store.remove(id: id)
     }
 
+    /// Persists a checkpoint from an app-owned background session callback.
+    ///
+    /// Terminal jobs ignore duplicate late callbacks and return their current
+    /// record. This makes delegate delivery idempotent after relaunch.
+    @discardableResult
+    public func recordCheckpoint(
+        id: UUID,
+        update: TransferJobUpdate
+    ) async throws -> TransferJob {
+        guard var job = jobs[id] else {
+            throw TransferJobCoordinatorError.jobUnavailable(id)
+        }
+        guard !job.state.isTerminal else { return job }
+        job.record(update)
+        jobs[id] = job
+        try await store.save(job)
+        return job
+    }
+
+    /// Commits success after the application has moved any temporary file to
+    /// its durable destination. Repeated terminal callbacks are harmless.
+    @discardableResult
+    public func commitSuccess(
+        id: UUID,
+        result: TransferJobResult
+    ) async throws -> TransferJob {
+        guard var job = jobs[id] else {
+            throw TransferJobCoordinatorError.jobUnavailable(id)
+        }
+        guard !job.state.isTerminal else { return job }
+        job.markSucceeded(result: result, now: Date())
+        jobs[id] = job
+        try await store.save(job)
+        return job
+    }
+
+    /// Persists a pause from an app-owned background session callback.
+    @discardableResult
+    public func pause(
+        id: UUID,
+        resumeData: Data? = nil
+    ) async throws -> TransferJob {
+        guard var job = jobs[id] else {
+            throw TransferJobCoordinatorError.jobUnavailable(id)
+        }
+        guard !job.state.isTerminal else { return job }
+        job.markPaused(resumeData: resumeData, now: Date())
+        jobs[id] = job
+        try await store.save(job)
+        return job
+    }
+
+    /// Persists a bounded failure identity from an app-owned callback.
+    @discardableResult
+    public func recordFailure(
+        id: UUID,
+        failure: TransferJobFailure
+    ) async throws -> TransferJob {
+        guard var job = jobs[id] else {
+            throw TransferJobCoordinatorError.jobUnavailable(id)
+        }
+        guard !job.state.isTerminal else { return job }
+        job.markFailed(
+            domain: failure.domain,
+            code: failure.code,
+            now: Date()
+        )
+        jobs[id] = job
+        try await store.save(job)
+        return job
+    }
+
     /// Runs one job and persists every lifecycle boundary.
     @discardableResult
     public func execute(
@@ -397,7 +493,7 @@ public actor TransferJobCoordinator {
 
         do {
             let result = try await operation(job) { [self] update in
-                try await record(id: id, update: update)
+                _ = try await recordCheckpoint(id: id, update: update)
             }
             guard var finished = jobs[id] else {
                 throw TransferJobCoordinatorError.jobUnavailable(id)
@@ -423,12 +519,6 @@ public actor TransferJobCoordinator {
         }
     }
 
-    private func record(id: UUID, update: TransferJobUpdate) async throws {
-        guard var job = jobs[id], !job.state.isTerminal else { return }
-        job.record(update)
-        jobs[id] = job
-        try await store.save(job)
-    }
 }
 
 private extension TransferJobState {

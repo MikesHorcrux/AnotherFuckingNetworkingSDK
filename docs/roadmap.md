@@ -20,6 +20,8 @@ roadmap item is not a shipped feature.
   relaunch-safe task descriptors bound to durable job IDs.
 - Actor-isolated `BackgroundTransferEventRouter` for collision-safe task-to-job
   reconciliation and typed post-relaunch event routing.
+- Actor-isolated coordinator checkpoint, pause, failure, and terminal-success
+  primitives for app-owned background callbacks.
 - `StreamingMultipartFormData` for bounded file-backed multipart uploads.
 - Opt-in operation and attempt telemetry with privacy-safe exporter events.
 - Transfer delegate task-metrics telemetry with privacy-safe snapshots.
