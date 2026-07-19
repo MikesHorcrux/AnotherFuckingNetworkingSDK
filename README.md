@@ -237,6 +237,30 @@ This is single-flight only: completed responses are not retained, and cancelled
 waiters do not cancel work still needed by other callers. See
 [Request coalescing](docs/request-coalescing.md) for lifecycle details.
 
+To bound concurrent response work, compose an actor-isolated limiter:
+
+~~~swift
+let limiter = try RequestConcurrencyLimiter(
+    maximumConcurrentRequests: 4,
+    maximumQueuedRequests: 128
+)
+let limitedClient = ConcurrencyLimitedAPIClient(
+    client: client,
+    limiter: limiter
+)
+
+let response = try await limitedClient.sendResponse(
+    GetUserRequest(userID: 42)
+)
+~~~
+
+Permits are FIFO and cancellation-aware, and cover retries plus decoding. The
+waiting queue is bounded; overload throws
+`RequestConcurrencyLimiterError.queueFull`. The
+decorator intentionally targets `APIClientResponseProtocol`; streams and file
+transfers need a lease that lasts through resource consumption. See
+[Request concurrency limits](docs/request-concurrency.md).
+
 For repeated endpoint failures, add an actor-isolated circuit breaker around
 the response client:
 

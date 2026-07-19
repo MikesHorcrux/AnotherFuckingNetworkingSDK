@@ -57,6 +57,8 @@ roadmap item is not a shipped feature.
   `Last-Modified` revalidation.
 - Actor-isolated keyed circuit breaking with bounded half-open recovery,
   cancellation preservation, and injectable failure classification.
+- Actor-isolated FIFO request concurrency limiting with cancellation-aware
+  waiters and a response-client decorator that covers retries and decoding.
 - Optional NetworkPathMonitor snapshots for connectivity-aware UI and policy;
   transport requests remain non-blocking.
 

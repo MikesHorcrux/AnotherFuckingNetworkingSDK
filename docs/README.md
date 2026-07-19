@@ -20,6 +20,7 @@ these pages explain decisions, lifecycle contracts, and operational tradeoffs.
 | Consume Server-Sent Events | [Server-Sent Events](server-sent-events.md) |
 | Consume typed NDJSON/JSON Lines | [JSON Lines](json-lines.md) |
 | Share duplicate concurrent reads | [Request coalescing](request-coalescing.md) |
+| Bound concurrent response requests | [Request concurrency limits](request-concurrency.md) |
 | Add bounded response caching | [Response caching](response-caching.md) |
 | Suppress repeated endpoint failures | [Circuit breaker](circuit-breaker.md) |
 | Validate physical devices and relaunch | [Device validation](device-validation.md) |

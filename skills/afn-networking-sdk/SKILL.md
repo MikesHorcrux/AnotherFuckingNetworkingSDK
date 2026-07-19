@@ -88,6 +88,11 @@ source and tests before relying on any example below.
   delegates use the same path after the upgrade handshake.
 - Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
   sharing that never retains completed responses.
+- Request concurrency: `RequestConcurrencyLimiter` and
+  `ConcurrencyLimitedAPIClient`; actor-isolated FIFO permits with cancellation
+  aware waiters and a bounded waiting queue. The response decorator covers complete response operations,
+  including retries and decoding, but deliberately does not pretend to bound
+  stream/file lifetimes.
 - Response caching: `CachedAPIClient`, `ConditionalCachedAPIClient`, and
   `ResponseCachePolicy`; bounded caller-keyed TTL/LRU storage, optional
   validator revalidation, and explicit invalidation.
@@ -166,6 +171,13 @@ Wrap a response-capable client in `RequestCoalescingAPIClient` for duplicate
 concurrent reads. Make the key include request type, URL inputs, auth scope,
 and feature flags; return `nil` when an operation must always execute. This is
 single-flight only, not a response cache.
+
+Use `RequestConcurrencyLimiter` when the service needs a hard bound on
+complete response operations. Compose `ConcurrencyLimitedAPIClient` at the
+boundary whose retries and decoding should count against the limit. Do not
+wrap a streaming or transfer method with a short-lived permit; the returned
+resource outlives the call and requires a lease that remains owned until EOF or
+file commit.
 
 ### Response caching
 
