@@ -85,4 +85,34 @@ struct NetworkTelemetryTests {
         #expect(events.withLock { $0.last?.phase } == .succeeded)
         #expect(events.withLock { $0.last?.durationNanoseconds } != nil)
     }
+
+    @Test("Transfer telemetry collects task metrics without progress callbacks")
+    func transferTaskMetrics() async throws {
+        let events = LockedBox<[NetworkTelemetryEvent]>([])
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                data: Data("uploaded".utf8)
+            ))
+        }
+        let client = stub.client(telemetry: NetworkTelemetry { event in
+            events.withLock { $0.append(event) }
+        })
+
+        _ = try await client.upload(
+            TelemetryUploadRequest(),
+            from: .data(Data("body".utf8))
+        )
+
+        let metrics = events.withLock { events in
+            events.filter { $0.phase == .taskMetrics }
+        }
+        #expect(!metrics.isEmpty)
+        #expect(metrics.allSatisfy { $0.taskMetrics != nil })
+    }
+}
+
+private struct TelemetryUploadRequest: RawDataRequest {
+    var path: String { "telemetry/upload" }
+    var method: HTTPMethod { .post }
 }

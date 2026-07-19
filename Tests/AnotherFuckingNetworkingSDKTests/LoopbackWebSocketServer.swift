@@ -91,6 +91,7 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
     private let state = LockedBox(State())
     private let completionSignal = AsyncSignal()
     private let receivedMessageSignal = AsyncSignal()
+    private let receivedPingSignal = AsyncSignal()
 
     private init(behavior: Behavior) throws {
         self.behavior = behavior
@@ -156,6 +157,10 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
 
     func waitForMessage() async {
         await receivedMessageSignal.wait()
+    }
+
+    func waitForPing() async {
+        await receivedPingSignal.wait()
     }
 
     func send(_ message: WebSocketMessage) async throws {
@@ -508,6 +513,7 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
 
         case 0x9:
             state.withLock { $0.pingCount += 1 }
+            Task { await receivedPingSignal.signal() }
             let pong = Self.makeFrame(opcode: 0xA, payload: frame.payload)
             connection.send(content: pong, completion: .contentProcessed {
                 [weak self, weak connection] error in

@@ -92,17 +92,20 @@ private final class TransferProgressDelegate: NSObject,
     @unchecked Sendable {
     private let operation: TransferProgressOperation
     private let attempt: Int
-    private let handler: TransferProgressHandler
+    private let handler: TransferProgressHandler?
+    private let metricsHandler: (@Sendable (NetworkTaskMetricsSnapshot) -> Void)?
     private let state: CriticalState<TransferProgress>
 
     init(
         operation: TransferProgressOperation,
         attempt: Int,
-        handler: @escaping TransferProgressHandler
+        handler: TransferProgressHandler?,
+        metricsHandler: (@Sendable (NetworkTaskMetricsSnapshot) -> Void)?
     ) {
         self.operation = operation
         self.attempt = attempt
         self.handler = handler
+        self.metricsHandler = metricsHandler
         state = CriticalState(TransferProgress(
             operation: operation,
             phase: .started,
@@ -149,6 +152,14 @@ private final class TransferProgressDelegate: NSObject,
         didFinishDownloadingTo location: URL
     ) {}
 
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        metricsHandler?(NetworkTaskMetricsSnapshot(metrics))
+    }
+
     func emit(
         phase: TransferProgressPhase,
         bytesCompleted: Int64,
@@ -162,7 +173,7 @@ private final class TransferProgressDelegate: NSObject,
             attempt: attempt
         )
         state.withCriticalRegion { $0 = event }
-        handler(event)
+        handler?(event)
     }
 }
 
@@ -178,6 +189,33 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
     /// A process-wide client for applications that prefer shared configuration.
     /// Dependency-injected instances are recommended for services and tests.
     public static let shared = APIClient()
+
+    private func makeTransferDelegate(
+        operation: TransferProgressOperation,
+        attempt: Int,
+        progress: TransferProgressHandler?,
+        telemetry: NetworkTelemetryContext?
+    ) -> TransferProgressDelegate? {
+        guard progress != nil || telemetry != nil else { return nil }
+        let metricsHandler: (@Sendable (NetworkTaskMetricsSnapshot) -> Void)?
+        if let telemetry {
+            metricsHandler = { snapshot in
+                telemetry.emit(
+                    phase: .taskMetrics,
+                    attempt: attempt,
+                    taskMetrics: snapshot
+                )
+            }
+        } else {
+            metricsHandler = nil
+        }
+        return TransferProgressDelegate(
+            operation: operation,
+            attempt: attempt,
+            handler: progress,
+            metricsHandler: metricsHandler
+        )
+    }
 
     /// Mutable client configuration protected by ``updateConfiguration(_:)``.
     public struct Configuration: Sendable {
@@ -834,13 +872,12 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                         totalBytes: totalBytes,
                         attempt: attempt
                     ))
-                    let delegate = progress.map {
-                        TransferProgressDelegate(
-                            operation: .upload,
-                            attempt: attempt,
-                            handler: $0
-                        )
-                    }
+                    let delegate = self.makeTransferDelegate(
+                        operation: .upload,
+                        attempt: attempt,
+                        progress: progress,
+                        telemetry: telemetry
+                    )
                     return try await self.urlSession.upload(
                         for: urlRequest,
                         from: data,
@@ -870,13 +907,12 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                         totalBytes: totalBytes,
                         attempt: attempt
                     ))
-                    let delegate = progress.map {
-                        TransferProgressDelegate(
-                            operation: .upload,
-                            attempt: attempt,
-                            handler: $0
-                        )
-                    }
+                    let delegate = self.makeTransferDelegate(
+                        operation: .upload,
+                        attempt: attempt,
+                        progress: progress,
+                        telemetry: telemetry
+                    )
                     return try await self.urlSession.upload(
                         for: urlRequest,
                         fromFile: fileURL,
@@ -911,13 +947,12 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
                         totalBytes: totalBytes,
                         attempt: attempt
                     ))
-                    let delegate = progress.map {
-                        TransferProgressDelegate(
-                            operation: .upload,
-                            attempt: attempt,
-                            handler: $0
-                        )
-                    }
+                    let delegate = self.makeTransferDelegate(
+                        operation: .upload,
+                        attempt: attempt,
+                        progress: progress,
+                        telemetry: telemetry
+                    )
                     return try await self.urlSession.upload(
                         for: urlRequest,
                         fromFile: multipartFileURL,
@@ -1069,13 +1104,12 @@ public final class APIClient: APIClientTransferProgressProtocol, APIClientStream
             let telemetryAttemptStartedAt = DispatchTime.now().uptimeNanoseconds
             telemetry?.emit(phase: .attemptStarted, attempt: attempt)
 
-            let progressDelegate = progress.map {
-                TransferProgressDelegate(
-                    operation: .download,
-                    attempt: attempt,
-                    handler: $0
-                )
-            }
+            let progressDelegate = makeTransferDelegate(
+                operation: .download,
+                attempt: attempt,
+                progress: progress,
+                telemetry: telemetry
+            )
             progress?(TransferProgress(
                 operation: .download,
                 phase: .started,
