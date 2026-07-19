@@ -1,0 +1,310 @@
+import Foundation
+import Testing
+@testable import AnotherFuckingNetworkingSDK
+
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+    struct StubResponse: Sendable {
+        let response: URLResponse
+        let data: Data
+
+        static func http(
+            for request: URLRequest,
+            responseURL: URL? = nil,
+            statusCode: Int = 200,
+            headers: [String: String]? = nil,
+            data: Data = Data()
+        ) throws -> Self {
+            let url = try #require(responseURL ?? request.url)
+            let response = try #require(HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            ))
+            return Self(response: response, data: data)
+        }
+    }
+
+    enum Action: Sendable {
+        case respond(StubResponse)
+        case fail(any Error)
+        case pending(
+            onStart: @Sendable () -> Void,
+            onStop: @Sendable () -> Void
+        )
+    }
+
+    typealias Handler = @Sendable (URLRequest) throws -> Action
+
+    static let registry = Registry()
+
+    private let stopHandler = LockedBox<(@Sendable () -> Void)?>(nil)
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        registry.handler(for: request) != nil
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.registry.handler(for: request) else {
+            client?.urlProtocol(
+                self,
+                didFailWithError: URLError(.unsupportedURL)
+            )
+            return
+        }
+
+        do {
+            switch try handler(request) {
+            case .respond(let stub):
+                client?.urlProtocol(
+                    self,
+                    didReceive: stub.response,
+                    cacheStoragePolicy: .notAllowed
+                )
+                if !stub.data.isEmpty {
+                    client?.urlProtocol(self, didLoad: stub.data)
+                }
+                client?.urlProtocolDidFinishLoading(self)
+
+            case .fail(let error):
+                client?.urlProtocol(self, didFailWithError: error)
+
+            case .pending(let onStart, let onStop):
+                stopHandler.withLock { $0 = onStop }
+                onStart()
+            }
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {
+        let handler = stopHandler.withLock { handler -> (@Sendable () -> Void)? in
+            defer { handler = nil }
+            return handler
+        }
+        handler?()
+    }
+}
+
+extension StubURLProtocol {
+    final class Registry: @unchecked Sendable {
+        private let handlers = LockedBox<[String: Handler]>([:])
+
+        func register(host: String, handler: @escaping Handler) {
+            handlers.withLock { $0[host] = handler }
+        }
+
+        func unregister(host: String) {
+            handlers.withLock { $0.removeValue(forKey: host) }
+        }
+
+        func handler(for request: URLRequest) -> Handler? {
+            guard let host = request.url?.host else { return nil }
+            return handlers.withLock { $0[host] }
+        }
+    }
+}
+
+final class StubSession: @unchecked Sendable {
+    let baseURL: URL
+    let session: URLSession
+
+    private let host: String
+
+    init(handler: @escaping StubURLProtocol.Handler) {
+        host = "test-\(UUID().uuidString.lowercased()).example"
+        baseURL = URL(string: "https://\(host)")!
+
+        StubURLProtocol.registry.register(host: host, handler: handler)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        session = URLSession(configuration: configuration)
+    }
+
+    deinit {
+        StubURLProtocol.registry.unregister(host: host)
+        session.invalidateAndCancel()
+    }
+
+    func client(
+        baseURL: URL? = nil,
+        globalHeaders: [String: String] = [:],
+        encoderFactory: @escaping APIClient.EncoderFactory = { JSONEncoder() },
+        decoderFactory: @escaping APIClient.DecoderFactory = { JSONDecoder() },
+        requestCustomizer: APIClient.RequestCustomizer? = nil,
+        maximumResponseBodyBytes: Int? = APIClient.Configuration.defaultMaximumResponseBodyBytes,
+        logger: NetworkingLogger? = nil,
+        activityMonitor: NetworkActivityMonitor? = nil,
+        telemetry: NetworkTelemetry? = nil,
+        fileIOExecutor: FileIOExecutor = .shared,
+        downloadOperation: DownloadOperation? = nil,
+        retrySleeper: @escaping RetrySleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        retryNow: @escaping RetryNowProvider = { Date() },
+        retryRandom: @escaping RetryRandomProvider = {
+            Double.random(in: 0...1)
+        }
+    ) -> APIClient {
+        APIClient(
+            baseURL: baseURL ?? self.baseURL,
+            urlSession: session,
+            globalHeaders: globalHeaders,
+            encoderFactory: encoderFactory,
+            decoderFactory: decoderFactory,
+            requestCustomizer: requestCustomizer,
+            maximumResponseBodyBytes: maximumResponseBodyBytes,
+            logger: logger,
+            activityMonitor: activityMonitor,
+            telemetry: telemetry,
+            fileIOExecutor: fileIOExecutor,
+            downloadOperation: downloadOperation,
+            retrySleeper: retrySleeper,
+            retryNow: retryNow,
+            retryRandom: retryRandom,
+            webSocketTransportFactory: {
+                session, request, configuration in
+                URLSessionWebSocketTransport(
+                    session: session,
+                    request: request,
+                    maximumMessageSize: configuration.maximumMessageSize,
+                    inboundBufferingPolicy:
+                        configuration.inboundBufferingPolicy
+                )
+            }
+        )
+    }
+}
+
+final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    @discardableResult
+    func withLock<Result>(_ operation: (inout Value) throws -> Result) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation(&value)
+    }
+}
+
+actor AsyncSignal {
+    private var isSignaled = false
+    private var continuations: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    /// Waits for a signal without allowing a broken callback to hang the suite.
+    @discardableResult
+    func wait(timeoutNanoseconds: UInt64 = 5_000_000_000) async -> Bool {
+        guard !isSignaled else { return true }
+
+        let didSignal = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await self.waitForSignal()
+                return true
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                    return false
+                } catch {
+                    return true
+                }
+            }
+
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+
+        if !didSignal {
+            Issue.record("Timed out waiting for an asynchronous test signal")
+        }
+        return didSignal
+    }
+
+    private func waitForSignal() async {
+        guard !isSignaled else { return }
+        let id = UUID()
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if isSignaled || Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    continuations[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWait(id: id) }
+        }
+    }
+
+    private func cancelWait(id: UUID) {
+        continuations.removeValue(forKey: id)?.resume()
+    }
+
+    func signal() {
+        guard !isSignaled else { return }
+        isSignaled = true
+        let pending = continuations.values
+        continuations.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
+    }
+}
+
+func requestBodyData(_ request: URLRequest) -> Data? {
+    if let body = request.httpBody {
+        return body
+    }
+
+    guard let stream = request.httpBodyStream else {
+        return nil
+    }
+
+    stream.open()
+    defer { stream.close() }
+
+    var data = Data()
+    let bufferSize = 1_024
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    defer { buffer.deallocate() }
+
+    while stream.hasBytesAvailable {
+        let count = stream.read(buffer, maxLength: bufferSize)
+        guard count >= 0 else { return nil }
+        guard count > 0 else { break }
+        data.append(buffer, count: count)
+    }
+
+    return data
+}
+
+struct TestUser: Codable, Equatable, Sendable {
+    let id: Int
+    let displayName: String
+}
+
+struct GetUserRequest: Request {
+    typealias ReturnType = TestUser
+
+    let id: Int
+    var path: String { "users/\(id)" }
+}
+
+struct EmptyRequest: Request {
+    typealias ReturnType = EmptyResponse
+    let path: String
+    var method: HTTPMethod { .delete }
+}

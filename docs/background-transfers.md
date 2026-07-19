@@ -1,0 +1,324 @@
+# Background and resumable transfers
+
+The foreground `APIClient` transfer methods are intentionally simple and
+durable at the file-ownership boundary. A background transfer has a second
+problem: queue identity must survive process termination, while the request
+value and platform session delegate remain application-owned. The SDK provides
+the persistence and state-machine seam without pretending that a foreground
+`URLSession` can continue after termination.
+
+## Durable model
+
+`TransferJob` is a `Codable`, `Sendable` record containing a stable UUID,
+application-defined `requestKey`, direction, state, progress checkpoint,
+optional resume data, destination URL, and the last error description. The
+request key is deliberately opaque: on relaunch, resolve it from your own
+database or dependency container rather than serializing arbitrary request
+types.
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> running: execute(id:operation:)
+    running --> running: checkpoint progress
+    running --> succeeded: operation returns
+    running --> paused: task cancellation
+    running --> failed: operation throws
+    paused --> running: caller resumes
+    failed --> running: caller retries
+    succeeded --> [*]
+    queued --> cancelled: cancel(id:)
+    paused --> cancelled: cancel(id:)
+    cancelled --> [*]
+```
+
+`TransferJobCoordinator` persists each lifecycle boundary through
+`TransferJobStore`. `InMemoryTransferJobStore` is useful for tests; use
+`JSONTransferJobStore` for a small app-owned index. JSON writes are atomic and
+run on the SDK's utility file-I/O queue.
+
+For a Foundation background session that continues after the process exits,
+use the coordinator's `recordCheckpoint`, `pause`, `recordFailure`, and
+`commitSuccess` methods from routed delegate callbacks. Call `commitSuccess`
+only after the application has committed a temporary download to its durable
+destination. Each method is actor-isolated and idempotent for late callbacks.
+
+## Integrating a background session
+
+`BackgroundURLSessionAdapter` owns the Foundation background session and
+translates delegate callbacks into `BackgroundTransferEvent` values. It is
+intentionally request-agnostic: the application still resolves `requestKey`,
+adds current credentials, and commits downloaded files.
+
+```swift
+let adapter = BackgroundURLSessionAdapter(
+    identifier: "com.example.exports",
+    eventHandler: { event in
+        Task { await backgroundEventRouter.handle(event) }
+    }
+)
+
+adapter.setBackgroundEventsCompletionHandler {
+    applicationCompletionHandler()
+}
+
+let task = adapter.download(
+    requestURLRequest,
+    resumeData: job.resumeData,
+    jobID: job.id
+)
+```
+
+Passing `jobID` stores a namespaced, opaque task description. On relaunch,
+reconcile Foundation's still-running tasks with the durable job index before
+handling delegate events:
+
+When a newly created task must be bound before any delegate callback can be
+delivered, pass `startImmediately: false` to `download` or
+`downloadValidated`, bind the returned task identifier through
+`BackgroundTransferEventRouter`, and call `resume(taskIdentifier:)`. The
+default remains `true` for the concise path.
+
+```swift
+for task in await adapter.transferTasks() {
+    guard let jobID = task.jobID else { continue }
+    let job = try await coordinator.job(id: jobID)
+    guard let job else { continue }
+    try await backgroundRouter.reconcile(BackgroundTransferRoute(
+        taskIdentifier: task.taskIdentifier,
+        jobID: job.id,
+        kind: job.kind
+    ))
+}
+```
+
+The lifecycle coordinator can own this validation and binding step:
+
+```swift
+let report = try await lifecycle.reconcile(adapter: adapter)
+for taskID in report.orphanedTaskIdentifiers {
+    cleanupUnknownTask(taskID)
+}
+for taskID in report.mismatchedTaskIdentifiers {
+    invalidateInconsistentTask(taskID)
+}
+```
+
+`BackgroundTransferRelaunchReport.routes` contains only descriptors that have
+both a durable job and a matching direction. Reconciliation is idempotent for
+the same task/job pair and still throws on a task identifier that is already
+bound to a different job. The SDK does not silently cancel or delete orphaned
+Foundation tasks; the application chooses its cleanup policy.
+`jobsWithoutTasks` lists non-terminal durable jobs that have no valid live
+Foundation task, which lets the application re-enqueue missing work separately
+from cleaning up orphaned tasks.
+
+Use the adapter's typed controls for relaunch-time task management. Pausing a
+download asks Foundation for resume data and bounds it before returning; the
+caller then persists the data through the durable coordinator:
+
+```swift
+let resumeData = try await adapter.pauseDownload(taskIdentifier: taskID)
+_ = try await coordinator.pause(id: jobID, resumeData: resumeData)
+
+try await adapter.resume(taskIdentifier: taskID)
+try await adapter.cancel(taskIdentifier: taskID)
+```
+
+Use `BackgroundTransferResumeDataValidator` before persisting data resolved
+from an application database or a relaunch callback. Its default `.bounded`
+mode enforces the SDK's non-empty and 8 MiB maximum without depending on a
+private Foundation format. The opt-in `.propertyList` mode additionally checks
+the current Foundation representation:
+
+```swift
+let validator = try BackgroundTransferResumeDataValidator()
+let resumeData = try validator.validate(
+    job.resumeData,
+    mode: .propertyList
+)
+_ = try await coordinator.pause(id: job.id, resumeData: resumeData)
+```
+
+Treat resume data as opaque, sensitive transport state. Strict property-list
+validation is an integrity check, not a guarantee that the server still
+supports byte-range resumption; the next Foundation task remains the
+authoritative compatibility check.
+
+`BackgroundTransferTaskControlError.taskNotFound` makes a task disappearing
+between inventory and control an explicit reconciliation event. Attempting to
+pause an upload throws `.notDownloadTask` rather than pretending resume data
+exists. The adapter never changes durable job state itself; keep the
+`TransferJobCoordinator` as the single writer.
+
+`BackgroundTransferEvent.taskIdentifier` is available on every task-scoped
+event, while `backgroundEventsFinished` has no task identifier. This makes it
+possible to route progress, metrics, temporary files, and completion events
+after process termination without persisting requests or credentials.
+
+`BackgroundTransferEventRouter` is an actor that rejects accidental task-ID
+collisions, supports idempotent relaunch reconciliation, and returns typed
+`BackgroundTransferRoutedEvent` values. Task descriptors and routes are
+`Codable`, so an app may persist the reconciliation table alongside its durable
+jobs. The router intentionally leaves file moves,
+resume-data validation, authentication, and terminal job commits to the
+application's `TransferJobCoordinator` policy.
+
+## Applying callbacks to durable jobs
+
+`BackgroundTransferLifecycleCoordinator` is the policy-composition seam for
+applications that want the SDK to apply the routine callback transitions. It
+is an actor over the router and `TransferJobCoordinator` and provides these
+guarantees:
+
+- the first progress or completion callback starts a queued/paused job exactly
+  once;
+- progress checkpoints carry the route's upload/download direction and the
+  restored attempt number;
+- a temporary download URL is retained only until its terminal callback;
+- a completion carrying bounded resume data becomes a paused job and retains
+  that opaque data for the next request resolution;
+- `commitDownload` runs before `commitSuccess`, so a failed file move leaves
+  the durable job non-terminal; and
+- malformed callback error text becomes a bounded, privacy-safe domain/code
+  identity rather than a persisted response or credential.
+
+The application supplies the destination commit because it owns overwrite,
+file protection, and conflict policy:
+
+```swift
+let lifecycle = BackgroundTransferLifecycleCoordinator(
+    router: backgroundRouter,
+    coordinator: coordinator,
+    commitDownload: { route, temporaryURL, destinationURL in
+        guard let destinationURL else {
+            throw BackgroundTransferLifecycleError.missingDownloadDestination(
+                route.jobID
+            )
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+        return destinationURL
+    },
+    metricsHandler: { route, snapshot in
+        metricsStore.record(route: route, snapshot: snapshot)
+    }
+)
+
+let adapter = BackgroundURLSessionAdapter(
+    identifier: "com.example.exports",
+    eventHandler: { event in
+        Task { try? await lifecycle.handle(event) }
+    }
+)
+```
+
+The coordinator returns a `BackgroundTransferLifecycleOutcome` for progress,
+staged downloads, resumable pauses, committed jobs, failures, metrics, and the
+session-wide completion event. Unknown task identifiers return `nil`, making stale callbacks
+from a replaced session harmless. Keep route bindings until the application
+has finished its own cleanup; the coordinator deliberately does not unbind
+them automatically so duplicate terminal callbacks remain idempotent.
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Store as TransferJobStore
+    participant Session as Background URLSession
+    participant Lifecycle as LifecycleCoordinator
+    App->>Store: restore jobs
+    App->>Session: transferTasks()
+    Session-->>App: taskIdentifier + jobID descriptors
+    App->>App: bind identifiers to jobs
+    Session-->>App: BackgroundTransferEvent
+    App->>Lifecycle: handle(event)
+    Lifecycle->>Lifecycle: route + start + checkpoint
+    Lifecycle->>App: commitDownload(tempURL)
+    App->>Store: persist checkpoint or terminal state
+```
+
+The delegate emits bounded progress, temporary download locations, completion
+errors, opaque resume data, privacy-safe task-metrics snapshots, and a final
+`backgroundEventsFinished` event. The system completion handler is invoked only
+after that terminal event. Keep the adapter alive for the session's lifetime
+and route events to the coordinator.
+
+The operation closure is the bridge to the application or a future dedicated
+background product. It receives the restored job and a checkpoint callback.
+Checkpoint data can contain `URLSession` resume data or another bounded,
+application-defined token.
+
+```swift
+let store = JSONTransferJobStore(fileURL: jobsURL)
+let coordinator = TransferJobCoordinator(store: store)
+try await coordinator.restore()
+
+let job = TransferJob(
+    kind: .download,
+    requestKey: "export-42",
+    destinationURL: destinationURL
+)
+try await coordinator.enqueue(job)
+
+let finished = try await coordinator.execute(id: job.id) { job, checkpoint in
+    let request = try await requestResolver(job.requestKey)
+    let response = try await backgroundSession.download(
+        request,
+        resumeData: job.resumeData,
+        progress: { progress, resumeData in
+            Task {
+                try? await checkpoint(TransferJobUpdate(
+                    progress: progress,
+                    resumeData: resumeData,
+                    destinationURL: job.destinationURL
+                ))
+            }
+        }
+    )
+    return TransferJobResult(
+        bytesCompleted: response.bytesCompleted,
+        totalBytes: response.totalBytes,
+        destinationURL: response.fileURL
+    )
+}
+```
+
+The `backgroundSession` in this example can be the adapter above or another
+application-owned implementation. The coordinator owns durable job state and
+must remain the single writer for that state. Validate resume data before
+resuming and move a finished temporary file to its destination before marking
+the job succeeded.
+
+## Cancellation and relaunch
+
+Cancel the task awaiting `execute` to pause a running transfer. The coordinator
+stores `.paused` and preserves the last checkpoint before rethrowing
+`CancellationError`. A queued or paused job can be marked `.cancelled` with
+`cancel(id:)`; running jobs must be cancelled through their executing task so
+the transport receives the same cancellation signal.
+
+On launch, call `restore()`, inspect `snapshot()`, resolve queued/paused jobs,
+and execute them with a newly rebound session delegate. Do not automatically
+resume every record without applying current authentication, destination, and
+data-retention policy.
+
+## Safety rules
+
+- Keep resume data bounded and treat it as sensitive opaque transport state.
+  `TransferJob` and `JSONTransferJobStore` enforce the same 8 MiB bound at
+  construction and restore time.
+- Failed job records retain only a bounded NSError domain/code identity; do not
+  persist localized error text or response payloads in durable state.
+- Never delete an upload source as part of pause, retry, or cancellation.
+- Do not mark a job succeeded until the destination commit has completed.
+- Persist a checkpoint before waiting on long application-level work.
+- Keep system background completion handlers separate from transfer progress
+  callbacks; call the handler only after all delegate work is drained.
+- Test relaunch and duplicate delegate callbacks with a real background-session
+  integration target on each supported Apple platform.
+
+The adapter is available on the package's iOS 15/macOS 12 baseline. It is
+intentionally unavailable on tvOS, watchOS, and visionOS because their
+background URLSession lifecycle contracts differ; use the durable coordinator
+with a platform-owned transfer implementation there. Platform behavior still
+needs device/relaunch integration coverage, and APIs may differ; keep those
+checks in the application lifecycle target.
