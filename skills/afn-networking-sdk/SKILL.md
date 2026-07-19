@@ -60,7 +60,11 @@ source and tests before relying on any example below.
   `jobsWithoutTasks` before handling events. Use the adapter's typed
   `pauseDownload`, `resume`, and `cancel` controls instead of reaching into
   raw URLSession tasks; persist returned bounded resume data through the
-  coordinator. The
+  coordinator. The `download` and `downloadValidated` APIs accept
+  `startImmediately: false` so an app can bind the Foundation task identifier
+  before resuming and avoid a callback/routing race. The repository's
+  `Examples/BackgroundTransferHost` project is the reference signed-host
+  fixture for device and process-relaunch validation. The
   Foundation background adapter is iOS/macOS-only; pair the durable
   coordinator with platform-owned transports on tvOS, watchOS, and visionOS.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
@@ -152,6 +156,8 @@ success until it completes. Do not pretend a foreground convenience task is
 durable. Validate persisted resume data with
 `BackgroundTransferResumeDataValidator`; use its default bounded mode for
 forward compatibility and `.propertyList` only as an opt-in integrity check.
+When binding a just-created task, create it with `startImmediately: false`,
+bind its returned task ID, then call `resume(taskIdentifier:)`.
 
 ### WebSockets and Observation
 
@@ -208,6 +214,10 @@ oldest supported platform when behavior crosses a platform boundary. The
 package declares iOS 15, macOS 12, tvOS 15, watchOS 8, and visionOS 1 targets;
 CI evaluates additional product builds when those SDKs are installed and
 always builds iOS, macOS, and Mac Catalyst.
+For background/relaunch work, also build
+`Examples/BackgroundTransferHost/BackgroundTransferHost.xcodeproj` for a
+generic iOS destination; sign it with the integrating app's team before
+attempting physical-device execution.
 
 ## Repository references
 
