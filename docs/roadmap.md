@@ -50,6 +50,8 @@ roadmap item is not a shipped feature.
   restorer adapter for application-defined cursors or session tokens.
 - Optional typed JSON WebSocket recovery codec and adapter with deterministic
   encoding and bounded decode failures.
+- Optional typed WebSocket message codecs and decoded sequences for JSON or
+  application-owned binary schemas, without changing raw transport semantics.
 - Redacted logging, privacy-safe activity snapshots, and actor-based mocks.
 - Validator-aware conditional caching with bounded `ETag`/
   `Last-Modified` revalidation.

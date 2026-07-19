@@ -71,8 +71,9 @@ source and tests before relying on any example below.
   typed seam is useful. Keep replay and authentication semantics
   application-owned, and persist only bounded, redacted/encrypted data.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
-  buffering, lifecycle state, Observation adapters, and opt-in
-  `WebSocketReliabilityClient` reconnect/heartbeat policies.
+  buffering, lifecycle state, Observation adapters, opt-in
+  `WebSocketReliabilityClient` reconnect/heartbeat policies, and
+  `WebSocketMessageCodec`/`JSONWebSocketMessageCodec` typed message helpers.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Connectivity: `NetworkPathMonitor` provides newest-only path snapshots for
@@ -154,7 +155,9 @@ session restoration are explicitly desired. Prefer `restorerWithContext` when
 a server cursor or session token needs the reconnect attempt and prior
 subprotocol. Use WebSocketRecoveryAdapter when that opaque state must survive
 process termination; persist only bounded, redacted/encrypted data and never
-assume the SDK can decode a product protocol. See
+assume the SDK can decode a product protocol. Use `WebSocketMessageCodec` for
+typed payloads; its decoded sequence must delegate to the existing `messages`
+sequence rather than starting another receive pump. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
 
 ### Request coalescing
