@@ -49,11 +49,18 @@ source and tests before relying on any example below.
 - Progress: `APIClientTransferProgressProtocol`, `TransferProgress`; callbacks
   are opt-in and must remain lightweight.
 - WebSockets: `WebSocketRequest`, `WebSocketConnectionProtocol`, bounded FIFO
-  buffering, lifecycle state, and Observation adapters.
+  buffering, lifecycle state, Observation adapters, and opt-in
+  `WebSocketReliabilityClient` reconnect/heartbeat policies.
 - Diagnostics: `NetworkActivityMonitor`, `NetworkingLogger`; never log tokens,
   cookies, bodies, or sensitive URLs by default.
 - Telemetry: `NetworkTelemetry`, privacy-safe operation/attempt events, and
-  `NetworkTelemetryExporter`; keep exporters lightweight and vendor-neutral.
+  `NetworkTelemetryExporter`, `NetworkTaskMetricsSnapshot`; keep exporters
+  lightweight and vendor-neutral. Map Foundation delegate metrics through the
+  snapshot initializer without retaining URL or payload data.
+- Request coalescing: `RequestCoalescingAPIClient`; caller-keyed single-flight
+  sharing that never retains completed responses.
+- Response caching: `CachedAPIClient` and `ResponseCachePolicy`; bounded
+  caller-keyed TTL/LRU storage with explicit invalidation.
 - Testing: `AnotherFuckingNetworkingSDKTesting` actor mocks and URL protocol
   fixtures; finite stream stubs, progress callbacks, and wrapper-aware
   type-wide matching mock one logical call rather than URLSession retry
@@ -97,8 +104,23 @@ pretend a foreground convenience task is durable.
 
 Keep one receive owner. Preserve FIFO order with a bounded buffer and fail
 closed on overflow. Do not add automatic reconnect or heartbeat behavior to
-the base connection; expose those as policy wrappers. See
+the base connection; use `WebSocketReliabilityClient` when bounded retry and
+session restoration are explicitly desired. See
 [`docs/websockets-and-transfers.md`](../../docs/websockets-and-transfers.md).
+
+### Request coalescing
+
+Wrap a response-capable client in `RequestCoalescingAPIClient` for duplicate
+concurrent reads. Make the key include request type, URL inputs, auth scope,
+and feature flags; return `nil` when an operation must always execute. This is
+single-flight only, not a response cache.
+
+### Response caching
+
+Use `CachedAPIClient` only for explicitly cacheable successful reads. Include
+request type, URL inputs, auth scope, locale, and feature flags in the key;
+invalidate after successful writes. Treat conditional validators and `304`
+handling as application policy until the dedicated adapter lands.
 
 ### Tests and release gates
 

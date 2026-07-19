@@ -208,6 +208,32 @@ let imageData = try await client.send(
 
 `RawDataRequest` returns the response bytes exactly and accepts successful empty bodies as `Data()`.
 
+## Request coalescing
+
+When several features ask for the same resource at once, wrap a response-capable
+client in `RequestCoalescingAPIClient` to share one in-flight operation:
+
+```swift
+let coalescingClient = RequestCoalescingAPIClient(client: client) { request in
+    guard let request = request as? GetUserRequest else { return nil }
+    return "user:\(request.userID)"
+}
+
+let user = try await coalescingClient.send(GetUserRequest(userID: 42))
+```
+
+The key provider must include the request type and every response-varying input,
+including auth scope, locale, and feature flags. Return `nil` to bypass sharing.
+This is single-flight only: completed responses are not retained, and cancelled
+waiters do not cancel work still needed by other callers. See
+[Request coalescing](docs/request-coalescing.md) for lifecycle details.
+
+For bounded response reuse, add `CachedAPIClient` with a caller-owned key and
+explicit TTL/size limits. It stores only successful responses and never
+invalidates mutations implicitly; call `invalidate(_:)` after a write. See
+[Response caching](docs/response-caching.md) for composition and validator
+guidance.
+
 ## Streaming HTTP responses
 
 Use `stream(_:)` when a response is large, long-lived, or naturally consumed
@@ -597,6 +623,28 @@ Cancelling an in-flight iteration closes the connection.
 
 The SDK deliberately does not reconnect automatically or choose a heartbeat schedule. Reconnect backoff, session restoration, and ping intervals/timeouts are application policy; call `ping()` directly or build that policy around `WebSocketClientProtocol`.
 
+For a bounded, opt-in policy, wrap the client in `WebSocketReliabilityClient`:
+
+```swift
+let reliableClient = WebSocketReliabilityClient(
+    client: client,
+    policy: .init(
+        maximumReconnectAttempts: 5,
+        heartbeatIntervalNanoseconds: 15_000_000_000
+    ),
+    restorer: { connection in
+        try await connection.send(text: "subscribe:lobby")
+    }
+)
+
+let connection = try await reliableClient.connect(ChatSocket(roomID: "lobby"))
+```
+
+Reconnects are attempted only for transport/close/handshake failures, use
+bounded exponential backoff with jitter, and never replay a message that
+Foundation already accepted. See [WebSocket reliability](docs/websocket-reliability.md)
+for lifecycle, testing, and session-restoration guidance.
+
 ## Empty responses
 
 Declare `EmptyResponse` for successful endpoints that intentionally return no body, including `204` and `205` responses:
@@ -752,7 +800,9 @@ let client = APIClient(
 or another metrics system. Keep exporters lightweight and enqueue work to an
 actor; delivery is synchronous and the default client has no telemetry cost.
 Stream completion is recorded at EOF, cancellation, failure, or deallocation,
-not when headers first arrive. See [Telemetry and metrics](docs/telemetry.md).
+not when headers first arrive. Delegate-owned integrations can convert
+`URLSessionTaskMetrics` with `NetworkTaskMetricsSnapshot(metrics)`; only timing
+values are retained. See [Telemetry and metrics](docs/telemetry.md).
 
 ## Safe request logging
 

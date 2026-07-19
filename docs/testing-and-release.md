@@ -38,7 +38,9 @@ env CLANG_MODULE_CACHE_PATH=/private/tmp/afn-clang-module-cache \
 ```
 
 The CI workflow should additionally cover the oldest deployment targets,
-distribution builds, and forward-looking Swift concurrency flags.
+distribution builds, and forward-looking Swift concurrency flags. The checked-in
+workflow runs the forward `NonisolatedNonsendingByDefault` build and generic
+iOS/macOS distribution builds.
 
 ## Performance gates
 
