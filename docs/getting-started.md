@@ -55,7 +55,8 @@ let client = APIClient(
 
 An endpoint can override the client policy by implementing
 `maximumResponseBodyBytes` on its `HTTPRequest`. Oversized buffered responses
-throw `NetworkError.responseBodyTooLarge` before decoding. Streaming requests
+are rejected while bytes are collected and throw
+`NetworkError.responseBodyTooLarge` before decoding. Streaming requests
 apply the same limit as bytes are consumed and throw
 `HTTPByteStreamError.responseBodyTooLarge`; the URLSession task is cancelled
 as soon as the first excess byte is observed.

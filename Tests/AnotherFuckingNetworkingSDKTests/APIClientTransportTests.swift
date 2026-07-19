@@ -148,6 +148,29 @@ struct APIClientTransportTests {
         }
     }
 
+    @Test("Rejected buffered responses retain only the bounded failure prefix")
+    func bufferedFailureBodyLimit() async throws {
+        let body = Data(repeating: 0x41, count: 1_048_577)
+        let stub = StubSession { request in
+            .respond(try .http(
+                for: request,
+                statusCode: 500,
+                data: body
+            ))
+        }
+
+        do {
+            _ = try await stub.client().sendResponse(RawFixtureRequest())
+            Issue.record("Expected requestFailed")
+        } catch let error as NetworkError {
+            guard case .requestFailed(let failure) = error else {
+                Issue.record("Expected requestFailed, got \(error)")
+                return
+            }
+            #expect(failure.data == nil)
+        }
+    }
+
     @Test("Streaming responses enforce the per-request body limit")
     func streamingResponseBodyLimit() async throws {
         let body = Data([1, 2, 3])
